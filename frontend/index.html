@@ -1,6 +1,37 @@
-<html>
-  <head>
-    <link data-trunk rel="scss" href="./index.scss"/>
-    <link data-trunk rel="rust"/>
-  </head>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ollama WebSocket WASM Client</title>
+    <link data-trunk rel="scss" href="index.scss" />
+    <link data-trunk rel="rust" />
+</head>
+<body>
+    <h1>Ollama WebSocket Chat</h1>
+    <div class="container">
+        <div>
+            <label for="model-select">Model:</label>
+            <select id="model-select">
+                <option value="phi4">phi4</option>
+                <option value="llama3">llama3</option>
+                <option value="gemma">gemma</option>
+            </select>
+        </div>
+        <div>
+            <label for="input-message">Your Message:</label>
+            <textarea id="input-message" placeholder="Type your message here..."></textarea>
+        </div>
+        <div class="controls">
+            <button id="send-btn">Send Message</button>
+            <button id="clear-btn">Clear Chat</button>
+            <button id="connect-btn">Connect</button>
+            <button id="disconnect-btn">Disconnect</button>
+        </div>
+        <div>
+            <h3>Messages:</h3>
+            <div id="messages"></div>
+        </div>
+    </div>
+</body>
 </html>

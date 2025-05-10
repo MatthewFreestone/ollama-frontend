@@ -10,7 +10,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{info, Level};
@@ -43,8 +43,8 @@ async fn main() {
         .with_state(AppState { client });
 
     // Start the server
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    info!("Listening on http://0.0.0.0:3000");
+    let listener = tokio::net::TcpListener::bind("localhost:3000").await.unwrap();
+    info!("Listening on http://localhost:3000");
     axum::serve(listener, app).await.unwrap();
 }
 
@@ -109,7 +109,7 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
     info!("WebSocket connection established");
 
     // Split the socket into sender and receiver
-    let (mut sender, mut receiver) = socket.split();
+    let (sender, mut receiver) = socket.split();
     
     // Use an Arc<Mutex<_>> to share the sender between tasks
     let sender = Arc::new(Mutex::new(sender));
