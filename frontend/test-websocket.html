@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ollama WebSocket Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 1rem;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        textarea {
+            height: 100px;
+            padding: 0.5rem;
+        }
+        #messages {
+            border: 1px solid #ccc;
+            padding: 1rem;
+            height: 300px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            background-color: #f5f5f5;
+        }
+        .message {
+            margin-bottom: 0.5rem;
+            padding: 0.5rem;
+            border-radius: 4px;
+        }
+        .user {
+            background-color: #e3f2fd;
+        }
+        .bot {
+            background-color: #f9f9f9;
+        }
+        .error {
+            background-color: #ffebee;
+            color: #d32f2f;
+        }
+        .controls {
+            display: flex;
+            gap: 0.5rem;
+        }
+        button {
+            padding: 0.5rem 1rem;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <h1>Ollama WebSocket Test</h1>
+    <div class="container">
+        <div>
+            <label for="modelSelect">Model:</label>
+            <select id="modelSelect">
+                <option value="phi4">phi4</option>
+                <option value="llama3">llama3</option>
+                <option value="gemma">gemma</option>
+            </select>
+        </div>
+        <div>
+            <label for="inputMessage">Your Message:</label>
+            <textarea id="inputMessage" placeholder="Type your message here..."></textarea>
+        </div>
+        <div class="controls">
+            <button id="sendBtn">Send Message</button>
+            <button id="clearBtn">Clear Chat</button>
+            <button id="connectBtn">Connect</button>
+            <button id="disconnectBtn">Disconnect</button>
+        </div>
+        <div>
+            <h3>Messages:</h3>
+            <div id="messages"></div>
+        </div>
+    </div>
+
+    <script>
+        let socket;
+        let connected = false;
+        const messagesDiv = document.getElementById('messages');
+        const inputMessage = document.getElementById('inputMessage');
+        const sendBtn = document.getElementById('sendBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        const modelSelect = document.getElementById('modelSelect');
+
+        // Connect to WebSocket server
+        function connect() {
+            if (connected) return;
+            
+            socket = new WebSocket('ws://localhost:3000/ws');
+
+            socket.onopen = function() {
+                connected = true;
+                console.log('Connected to WebSocket server');
+                addMessage('System', 'Connected to WebSocket server', 'bot');
+                updateButtons();
+            };
+
+            socket.onmessage = function(event) {
+                console.log('Message from server:', event.data);
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.error) {
+                        addMessage('Error', data.error, 'error');
+                    } else if (data.message && data.message.content) {
+                        addMessage('Bot', data.message.content, 'bot');
+                    } else {
+                        // For streaming responses
+                        addMessage('Bot', JSON.stringify(data, null, 2), 'bot');
+                    }
+                } catch (e) {
+                    // Handle non-JSON responses
+                    addMessage('Bot', event.data, 'bot');
+                }
+            };
+
+            socket.onclose = function() {
+                connected = false;
+                console.log('Disconnected from WebSocket server');
+                addMessage('System', 'Disconnected from WebSocket server', 'bot');
+                updateButtons();
+            };
+
+            socket.onerror = function(error) {
+                console.error('WebSocket error:', error);
+                addMessage('Error', 'WebSocket error occurred', 'error');
+            };
+        }
+
+        // Disconnect from WebSocket server
+        function disconnect() {
+            if (socket && connected) {
+                socket.close();
+            }
+        }
+
+        // Add message to chat
+        function addMessage(sender, text, className) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${className}`;
+            messageDiv.textContent = `${sender}: ${text}`;
+            messagesDiv.appendChild(messageDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        // Send message to server
+        function sendMessage() {
+            if (!connected) {
+                addMessage('Error', 'Not connected to server', 'error');
+                return;
+            }
+
+            const message = inputMessage.value.trim();
+            if (!message) return;
+
+            const model = modelSelect.value;
+            
+            // Add user message to chat
+            addMessage('You', message, 'user');
+
+            // Create request payload
+            const payload = {
+                model: model,
+                messages: [
+                    {
+                        role: "user",
+                        content: message
+                    }
+                ],
+                stream: true
+            };
+
+            // Send message to server
+            socket.send(JSON.stringify(payload));
+            
+            // Clear input
+            inputMessage.value = '';
+        }
+
+        // Clear chat messages
+        function clearChat() {
+            messagesDiv.innerHTML = '';
+        }
+
+        // Update button states
+        function updateButtons() {
+            sendBtn.disabled = !connected;
+            connectBtn.disabled = connected;
+            disconnectBtn.disabled = !connected;
+        }
+
+        // Event listeners
+        sendBtn.addEventListener('click', sendMessage);
+        clearBtn.addEventListener('click', clearChat);
+        connectBtn.addEventListener('click', connect);
+        disconnectBtn.addEventListener('click', disconnect);
+        
+        // Allow sending with Enter key
+        inputMessage.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        // Initial button state
+        updateButtons();
+    </script>
+</body>
+</html>
