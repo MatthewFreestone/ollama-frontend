@@ -1,9 +1,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use common::ConvoId;
-use common::{ChatMessage, ChatType, OllamaResponse, WsChatRequest};
-use serde_json::json;
+use common::{ContinueConvo, ConvoId};
+use common::{ChatMessage, ChatType, WsChatRequest, WsResponse};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{
@@ -145,6 +144,8 @@ impl AppState {
     fn clear_chat(&mut self) {
         self.messages_div.set_inner_html("");
         self.current_bot_message = None; // Reset the bot message reference
+        self.current_convo_id = None; // Reset the conversation ID
+        log("Chat and conversation ID cleared");
     }
 
     // Connect to WebSocket server
@@ -199,25 +200,37 @@ impl AppState {
                             let txt_str = String::from(txt);
                             log(&format!("Received message: {}", &txt_str));
 
-                            match serde_json::from_str::<OllamaResponse>(&txt_str) {
-                                Ok(response) => {
-                                    log("Successfully parsed Ollama response");
+                            match serde_json::from_str::<WsResponse>(&txt_str) {
+                                Ok(ws_response) => {
+                                    log("Successfully parsed WebSocket response");
+
+                                    // Extract the Ollama response
+                                    let response = &ws_response.response;
+
+                                    // Store conversation ID if it's included
+                                    if let Some(convo_id) = ws_response.conversation_id {
+                                        log(&format!("Received conversation ID: {}", convo_id.0));
+                                        app_state.current_convo_id = Some(convo_id);
+                                    }
 
                                     // Check if this is the done message indicating the stream is complete
-                                    if response.done.unwrap_or(false) {
-                                        log("Stream complete (done message received)");
+                                    let is_final = ws_response.is_final.unwrap_or(false) ||
+                                                   response.done.unwrap_or(false);
+
+                                    if is_final {
+                                        log("Stream complete (final message received)");
                                         // Just leave the message as is, we're finished with this response
                                         return;
                                     }
 
-                                    if let Some(error) = response.error {
+                                    if let Some(error) = &response.error {
                                         log(&format!("Error message: {}", error));
-                                        app_state.add_message("Error", &error, "error");
-                                    } else if let Some(message) = response.message {
+                                        app_state.add_message("Error", error, "error");
+                                    } else if let Some(message) = &response.message {
                                         log("Found message field in response");
                                         log(&format!("Adding bot message: {}", message.content));
                                         app_state.add_message("Bot", &message.content, "bot");
-                                    } else if let Some(content) = response.content {
+                                    } else if let Some(content) = &response.content {
                                         // Extract accumulated content
                                         log(&format!("Streaming token: {}", content));
 
@@ -237,15 +250,14 @@ impl AppState {
                                         // Append the new token to the accumulated text
                                         // Note: Ollama doesn't send complete words in chunks,
                                         // so we need to append individual tokens and display
-                                        app_state.add_message("Bot", &(current_text.to_string() + &content), "bot");
+                                        app_state.add_message("Bot", &(current_text.to_string() + content), "bot");
                                     } else {
                                         // Unknown format, just display as is
                                         log("Unknown response format, displaying raw JSON");
                                         app_state.add_message("Bot", &txt_str, "bot");
                                     }
-                                }
+                                },
                                 Err(e) => {
-                                    // Handle non-JSON responses
                                     log(&format!("Failed to parse JSON: {}", e));
                                     app_state.add_message("Bot", &txt_str, "bot");
                                 }
@@ -351,14 +363,30 @@ impl AppState {
         // Add user message to chat
         self.add_message("You", &message, "user");
 
-        // Create request payload
-        let payload = WsChatRequest {
-            model,
-            chat_type: ChatType::NewConvo(vec![ChatMessage {
-                role: "user".to_string(),
-                content: message.to_string(),
-            }]),
-            options: None,
+        // Create the chat message
+        let user_message = ChatMessage {
+            role: "user".to_string(),
+            content: message.to_string(),
+        };
+
+        // Create request payload based on whether we have a conversation ID
+        let payload = if let Some(convo_id) = &self.current_convo_id {
+            log(&format!("Continuing conversation with ID: {}", convo_id.0));
+            WsChatRequest {
+                model,
+                chat_type: ChatType::ContinueConvo(ContinueConvo {
+                    new_message: user_message,
+                    conversation_id: *convo_id,
+                }),
+                options: None,
+            }
+        } else {
+            log("Starting new conversation");
+            WsChatRequest {
+                model,
+                chat_type: ChatType::NewConvo(vec![user_message]),
+                options: None,
+            }
         };
 
         // Send message to server
@@ -394,7 +422,7 @@ impl Clone for AppState {
             connect_btn: self.connect_btn.clone(),
             disconnect_btn: self.disconnect_btn.clone(),
             clear_btn: self.clear_btn.clone(),
-            current_convo_id: self.current_convo_id.clone(),
+            current_convo_id: self.current_convo_id,
             current_bot_message: self.current_bot_message.clone(),
         }
     }

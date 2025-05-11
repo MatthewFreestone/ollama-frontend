@@ -7,7 +7,7 @@ use axum::{
     routing::get,
     Router,
 };
-use common::{ChatMessage, ChatType, ConvoId, OllamaChatRequest, OllamaResponse, WsChatRequest};
+use common::{ChatMessage, ChatType, ConvoId, OllamaChatRequest, OllamaResponse, WsChatRequest, WsResponse};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use sqlx::{migrate::MigrateDatabase, query, query_as, sqlite::SqlitePoolOptions, Sqlite};
@@ -257,18 +257,40 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
                                                     // Try to parse the response using our typed struct
                                                     if let Ok(ollama_response) = serde_json::from_str::<OllamaResponse>(&text) {
                                                         // Check if this is the done message
-                                                        if ollama_response.done.unwrap_or(false) {
+                                                        let is_done = ollama_response.done.unwrap_or(false);
+                                                        if is_done {
                                                             completed_safely = true;
                                                         }
 
                                                         // Extract content from the response
-                                                        if let Some(content) = ollama_response.content {
-                                                            complete_response.content.push_str(&content);
-                                                        } else if let Some(message) = ollama_response.message {
+                                                        if let Some(content) = &ollama_response.content {
+                                                            complete_response.content.push_str(content);
+                                                        } else if let Some(message) = &ollama_response.message {
                                                             complete_response.content.push_str(&message.content);
                                                         }
+
+                                                        // Wrap the response to include conversation ID
+                                                        let wrapped_response = WsResponse {
+                                                            response: ollama_response,
+                                                            conversation_id: if is_done { Some(convo_id.clone()) } else { None },
+                                                            is_final: if is_done { Some(true) } else { None },
+                                                        };
+
+                                                        // Serialize the wrapped response
+                                                        let wrapped_text = serde_json::to_string(&wrapped_response).unwrap();
+                                                        let message = Message::Text(wrapped_text.into());
+
+                                                        let mut lock = sender_clone.lock().await;
+                                                        if lock.send(message).await.is_err() {
+                                                            completed_safely = true;
+                                                            break;
+                                                        }
+
+                                                        // Skip the original message send below
+                                                        continue;
                                                     }
 
+                                                    // If we couldn't parse it as an OllamaResponse, send the original message
                                                     let mut lock = sender_clone.lock().await;
                                                     if lock.send(text_message).await.is_err() {
                                                         completed_safely = true;
@@ -331,7 +353,14 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
                                         error: Some(e.to_string()),
                                     };
 
-                                    let error_msg = serde_json::to_string(&ollama_error).unwrap();
+                                    // Wrap the error response to include conversation ID
+                                    let wrapped_error = WsResponse {
+                                        response: ollama_error,
+                                        conversation_id: Some(convo_id),
+                                        is_final: Some(true),
+                                    };
+
+                                    let error_msg = serde_json::to_string(&wrapped_error).unwrap();
 
                                     // Save the error as a system message in the database
                                     let next_message_number = query!(

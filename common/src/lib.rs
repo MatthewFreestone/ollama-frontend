@@ -21,7 +21,7 @@ pub struct ContinueConvo {
     pub conversation_id: ConvoId,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 pub struct ConvoId(pub i64);
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -66,4 +66,18 @@ pub struct OllamaChatRequest {
     pub messages: Vec<ChatMessage>,
     pub stream: Option<bool>,
     pub options: Option<ChatOptions>,
+}
+
+// Response wrapper to add conversation ID to all responses
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WsResponse {
+    // The original Ollama response
+    #[serde(flatten)]
+    pub response: OllamaResponse,
+
+    // The conversation ID (only set once when streaming is complete)
+    pub conversation_id: Option<ConvoId>,
+
+    // Field to indicate if this is the final response in a stream
+    pub is_final: Option<bool>,
 }
