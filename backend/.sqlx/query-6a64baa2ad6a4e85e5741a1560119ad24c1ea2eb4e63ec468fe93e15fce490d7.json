@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                SELECT u.id\n                FROM users u\n                JOIN auth_tokens t ON u.id = t.user_id\n                WHERE t.token = ?\n                  AND t.is_revoked = 0\n                ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "6a64baa2ad6a4e85e5741a1560119ad24c1ea2eb4e63ec468fe93e15fce490d7"
+}

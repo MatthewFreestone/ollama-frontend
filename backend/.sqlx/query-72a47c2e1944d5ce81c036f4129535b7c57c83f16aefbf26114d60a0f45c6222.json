@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE auth_tokens SET is_revoked = 1 WHERE token = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "72a47c2e1944d5ce81c036f4129535b7c57c83f16aefbf26114d60a0f45c6222"
+}

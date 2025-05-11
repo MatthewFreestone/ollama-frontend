@@ -4,18 +4,24 @@ use axum::{
         State,
     },
     response::IntoResponse,
-    routing::get,
-    Router,
+    routing::{get, post},
+    Router, Json, http::StatusCode,
 };
 use common::{ChatMessage, ChatType, ConvoId, OllamaChatRequest, OllamaResponse, WsChatRequest, WsResponse};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use sqlx::{migrate::MigrateDatabase, query, query_as, sqlite::SqlitePoolOptions, Sqlite};
-use std::{path::Path, sync::Arc};
+use std::{path::Path, result, sync::Arc};
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
+
+mod auth;
+use auth::{
+    AuthResponse, ApiError, AuthUser, LoginRequest, SignupRequest,
+    hash_password, verify_password, generate_token
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -58,8 +64,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arced_db_pool = Arc::new(db_pool);
     // Build the router
     let app = Router::new()
-        // .route("/api/chat", post(proxy_ollama))
         .route("/ws", get(websocket_handler))
+        .route("/api/auth/signup", post(signup_handler))
+        .route("/api/auth/login", post(login_handler))
+        .route("/api/auth/logout", post(logout_handler))
         .layer(cors)
         .with_state(AppState { client, db_pool: arced_db_pool });
 
@@ -76,34 +84,36 @@ struct AppState {
     db_pool: Arc<sqlx::SqlitePool>,
 }
 
-// Legacy endpoint for direct proxying
-// async fn proxy_ollama(
-//     State(state): State<AppState>, 
-//     axum::extract::Json(payload): axum::extract::Json<serde_json::Value>
-// ) -> impl IntoResponse {
-//     let res = state.client
-//         .post("http://localhost:11434/api/chat")
-//         .json(&payload)
-//         .send()
-//         .await;
-
-//     match res {
-//         Ok(response) => {
-//             let stream = response.bytes_stream();
-//             axum::response::Response::new(
-//                 axum::body::Body::from_stream(stream)
-//             )
-//         },
-//         Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-//     }
-// }
-
 // WebSocket handler
 async fn websocket_handler(
     ws: WebSocketUpgrade,
+    headers: axum::http::HeaderMap,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_websocket(socket, state))
+    // Extract the token from headers
+    let user_id: Option<i64> = if let Some(token) = auth::extract_token_from_headers(&headers) {
+        info!("WebSocket connection with token: {}", token);
+        let foo  = query!(
+                r#"
+                SELECT u.id
+                FROM users u
+                JOIN auth_tokens t ON u.id = t.user_id
+                WHERE t.token = ?
+                  AND t.is_revoked = 0
+                "#,
+                token
+            )
+            .fetch_optional(state.db_pool.as_ref())
+            .await
+            .ok()
+            .flatten();
+        foo.and_then(|user| user.id)
+    } else {
+        info!("WebSocket connection without token");
+        None
+    };
+
+    ws.on_upgrade(move |socket| handle_websocket(socket, state, user_id))
 }
 
 
@@ -111,12 +121,215 @@ async fn websocket_handler(
 // We're now using the OllamaChatRequest struct from the common library
 
 
-async fn handle_websocket(socket: WebSocket, state: AppState) {
+// Authentication handlers
+async fn signup_handler(
+    State(state): State<AppState>,
+    Json(req): Json<SignupRequest>,
+) -> Result<(StatusCode, Json<AuthResponse>), (StatusCode, Json<ApiError>)> {
+    // Validate username and password
+    if req.username.trim().is_empty() || req.username.len() < 1 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "Username must be at least 1 character".to_string(),
+            }),
+        ));
+    }
+
+    if req.password.len() < 1 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "Password must be at least 1 character".to_string(),
+            }),
+        ));
+    }
+
+    // Check if username already exists
+    let existing_user = query!("SELECT id FROM users WHERE username = ?", req.username)
+        .fetch_optional(state.db_pool.as_ref())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: format!("Database error: {}", e),
+                }),
+            )
+        })?;
+
+    if existing_user.is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: "Username already exists".to_string(),
+            }),
+        ));
+    }
+
+    // Hash the password
+    let password_hash = hash_password(&req.password).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: e,
+            }),
+        )
+    })?;
+
+    // Create the user
+    let user_id = query!(
+        "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+        req.username,
+        password_hash
+    )
+    .execute(state.db_pool.as_ref())
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: format!("Failed to create user: {}", e),
+            }),
+        )
+    })?
+    .last_insert_rowid();
+
+    // Verify the user was created
+    let user_id = query!(
+        "SELECT id FROM users WHERE id = ?",
+        user_id
+    )
+    .fetch_one(state.db_pool.as_ref())
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: format!("Failed to create user: {}", e),
+            }),
+        )
+    })?
+    .id;
+
+    // Generate an auth token
+    let token = generate_token(user_id, &state).await?;
+
+    // Return the user and token
+    Ok((
+        StatusCode::CREATED,
+        Json(AuthResponse {
+            user: auth::User {
+                id: user_id,
+                username: req.username,
+            },
+            token: token.token,
+        }),
+    ))
+}
+
+async fn login_handler(
+    State(state): State<AppState>,
+    Json(req): Json<LoginRequest>,
+) -> Result<(StatusCode, Json<AuthResponse>), (StatusCode, Json<ApiError>)> {
+    // Find the user
+    let user = query!(
+        "SELECT id, username, password_hash FROM users WHERE username = ?",
+        req.username
+    )
+    .fetch_optional(state.db_pool.as_ref())
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: format!("Database error: {}", e),
+            }),
+        )
+    })?;
+
+    let user = user.ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ApiError {
+                error: "Invalid username or password".to_string(),
+            }),
+        )
+    })?;
+
+    // Verify the password
+    let password_valid = verify_password(&req.password, &user.password_hash).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: e,
+            }),
+        )
+    })?;
+
+    if !password_valid {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ApiError {
+                error: "Invalid username or password".to_string(),
+            }),
+        ));
+    }
+
+    // Generate an auth token
+    let token = generate_token(user.id, &state).await?;
+
+    // Return the user and token
+    Ok((
+        StatusCode::OK,
+        Json(AuthResponse {
+            user: auth::User {
+                id: user.id,
+                username: user.username,
+            },
+            token: token.token,
+        }),
+    ))
+}
+
+async fn logout_handler(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    headers: axum::http::HeaderMap,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    // Retrieve token from header and mark it as revoked
+    // Note: This is already validated by the AuthUser extractor
+    let token = auth::extract_token_from_headers(&headers);
+
+    if let Some(token) = token {
+        // Revoke the token
+        query!("UPDATE auth_tokens SET is_revoked = 1 WHERE token = ?", token)
+            .execute(state.db_pool.as_ref())
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiError {
+                        error: format!("Failed to revoke token: {}", e),
+                    }),
+                )
+            })?;
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn handle_websocket(socket: WebSocket, state: AppState, user_id: Option<i64>) {
     info!("WebSocket connection established");
+    if let Some(uid) = user_id {
+        info!("Authenticated connection for user ID: {}", uid);
+    } else {
+        info!("Unauthenticated connection");
+    }
 
     // Split the socket into sender and receiver
     let (sender, mut receiver) = socket.split();
-    
+
     // Use an Arc<Mutex<_>> to share the sender between tasks
     let sender = Arc::new(Mutex::new(sender));
     let db_pool: Arc<sqlx::SqlitePool> = Arc::clone(&state.db_pool);
@@ -145,6 +358,46 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
                         let (messages, convo_id) = match request.chat_type {
                             ChatType::ContinueConvo(continue_convo) => {
                                 info!("Continuing conversation with ID: {}", continue_convo.conversation_id.0);
+
+                                // If user is authenticated, check if they own this conversation
+                                if let Some(uid) = user_id {
+                                    let conversation = query!(
+                                        "SELECT user_id FROM conversations WHERE id = ?",
+                                        continue_convo.conversation_id.0
+                                    )
+                                    .fetch_optional(db_pool.as_ref())
+                                    .await;
+
+                                    match conversation {
+                                        Ok(Some(convo)) => {
+                                            // If conversation has an owner (not null user_id)
+                                            if let Some(convo_user_id) = convo.user_id {
+                                                // Check if the authenticated user owns this conversation
+                                                if convo_user_id != uid {
+                                                    info!("Unauthorized access attempt to conversation {}", continue_convo.conversation_id.0);
+                                                    // Send error message for unauthorized access
+                                                    let error_msg = serde_json::json!({
+                                                        "error": "You do not have permission to access this conversation"
+                                                    }).to_string();
+
+                                                    let mut lock = sender.lock().await;
+                                                    let _ = lock.send(Message::Text(error_msg.into())).await;
+                                                    return;
+                                                }
+                                            }
+                                        },
+                                        _ => {
+                                            info!("Conversation {} not found", continue_convo.conversation_id.0);
+                                            let error_msg = serde_json::json!({
+                                                "error": "Conversation not found"
+                                            }).to_string();
+
+                                            let mut lock = sender.lock().await;
+                                            let _ = lock.send(Message::Text(error_msg.into())).await;
+                                            return;
+                                        }
+                                    }
+                                }
 
                                 // Get previous messages
                                 let mut previous_messages = query_as!(ChatMessage,
@@ -190,11 +443,21 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
                                 let messages = new_convo;
 
                                 // Create a new row in the conversations table
-                                let new_conversation_id = query!("INSERT INTO conversations DEFAULT VALUES")
-                                    .execute(db_pool.as_ref())
-                                    .await
-                                    .unwrap()
-                                    .last_insert_rowid();
+                                let new_conversation_id = if let Some(uid) = user_id {
+                                    // If authenticated, associate conversation with user
+                                    query!("INSERT INTO conversations (user_id) VALUES (?)", uid)
+                                        .execute(db_pool.as_ref())
+                                        .await
+                                        .unwrap()
+                                        .last_insert_rowid()
+                                } else {
+                                    // For unauthenticated users
+                                    query!("INSERT INTO conversations DEFAULT VALUES")
+                                        .execute(db_pool.as_ref())
+                                        .await
+                                        .unwrap()
+                                        .last_insert_rowid()
+                                };
 
                                 // Now, insert the user message(s) into the messages table
                                 let mut message_number: i64 = 0;
