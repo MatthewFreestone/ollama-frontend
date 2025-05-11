@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT role, content FROM conversations WHERE id = ? ORDER BY message_number",
+  "query": "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY message_number",
   "describe": {
     "columns": [
       {
@@ -22,5 +22,5 @@
       false
     ]
   },
-  "hash": "7a8ed9a9b0a1f4f3b8d801eb61027d73de5fd1a29631b478fe7e035a71c40974"
+  "hash": "e98db9c8831d2ebbf647fe5c39882c78549c1322427814881859cdadf616a3ad"
 }

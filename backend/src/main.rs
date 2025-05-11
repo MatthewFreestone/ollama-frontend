@@ -7,10 +7,11 @@ use axum::{
     routing::get,
     Router,
 };
-use futures_util::{SinkExt, StreamExt};
+use common::{ChatMessage, ChatOptions, ChatType, ConvoId, WsChatRequest};
+use futures_util::{task, SinkExt, StreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use sqlx::{migrate::MigrateDatabase, query_as, sqlite::SqlitePoolOptions, Sqlite};
+use sqlx::{migrate::MigrateDatabase, query, query_as, sqlite::SqlitePoolOptions, Sqlite};
 use std::{path::Path, sync::Arc};
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
@@ -26,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
     
     info!("Starting Ollama frontend server");
-    let db_path = "data/app.db";
+    let db_path = "database.db";
     let db_url = format!("sqlite://{}", db_path);
 
     // Check if the database file exists
@@ -55,13 +56,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create shared client
     let client = Arc::new(Client::new());
-
+    let arced_db_pool = Arc::new(db_pool);
     // Build the router
     let app = Router::new()
         // .route("/api/chat", post(proxy_ollama))
         .route("/ws", get(websocket_handler))
         .layer(cors)
-        .with_state(AppState { client, db_pool });
+        .with_state(AppState { client, db_pool: arced_db_pool });
 
     // Start the server
     let listener = tokio::net::TcpListener::bind("localhost:3000").await.unwrap();
@@ -73,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[derive(Clone)]
 struct AppState {
     client: Arc<Client>,
-    db_pool: sqlx::SqlitePool,
+    db_pool: Arc<sqlx::SqlitePool>,
 }
 
 // Legacy endpoint for direct proxying
@@ -116,41 +117,6 @@ struct OllamaChatRequest {
     options: Option<ChatOptions>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct WsChatRequest {
-    model: String,
-    chat_type: ChatType,
-    options: Option<ChatOptions>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-enum ChatType {
-    ContinueConvo(ContinueConvo),
-    NewConvo(Vec<ChatMessage>),
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ContinueConvo {
-    new_message: ChatMessage,
-    conversation_id: ConvoId,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ConvoId(String);
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ChatMessage {
-    role: String,
-    content: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ChatOptions {
-    temperature: Option<f32>,
-    top_p: Option<f32>,
-    top_k: Option<u32>,
-    num_predict: Option<u32>,
-}
 
 async fn handle_websocket(socket: WebSocket, state: AppState) {
     info!("WebSocket connection established");
@@ -160,7 +126,7 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
     
     // Use an Arc<Mutex<_>> to share the sender between tasks
     let sender = Arc::new(Mutex::new(sender));
-
+    let db_pool: Arc<sqlx::SqlitePool> = Arc::clone(&state.db_pool);
     // Process incoming messages
     while let Some(msg) = receiver.next().await {
         let msg = match msg {
@@ -183,22 +149,79 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
                         // Set default model to phi4 if not specified
                         let model = if request.model.is_empty() { "phi4".to_string() } else { request.model };
                         
-                        let messages: Vec<ChatMessage> = match request.chat_type {
+                        let (messages, convo_id) = match request.chat_type {
                             ChatType::ContinueConvo(continue_convo) => {
                                 info!("Continuing conversation with ID: {}", continue_convo.conversation_id.0);
+
+                                // Get previous messages
                                 let mut previous_messages = query_as!(ChatMessage,
-                                    "SELECT role, content FROM conversations WHERE id = ? ORDER BY message_number",
+                                    "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY message_number",
                                     continue_convo.conversation_id.0
-                                ).fetch_all(&state.db_pool).await.unwrap();
+                                ).fetch_all(db_pool.as_ref()).await.unwrap();
+
                                 if previous_messages.is_empty() {
                                     tracing::warn!("No messages found for conversation ID: {}", continue_convo.conversation_id.0);
                                     return;
                                 }
-                                // Handle continue conversation
-                                previous_messages.push(continue_convo.new_message);
-                                previous_messages
+
+                                // Find the next message number for this conversation
+                                let next_message_number = query!(
+                                    "SELECT MAX(message_number) as max_num FROM messages WHERE conversation_id = ?",
+                                    continue_convo.conversation_id.0
+                                )
+                                .fetch_one(db_pool.as_ref())
+                                .await
+                                .map(|record| record.max_num.unwrap_or(0) + 1)
+                                .unwrap_or(0);
+
+                                // Save the new user message
+                                match query!(
+                                    "INSERT INTO messages (conversation_id, role, content, message_number) VALUES (?, ?, ?, ?)",
+                                    continue_convo.conversation_id.0,
+                                    continue_convo.new_message.role,
+                                    continue_convo.new_message.content,
+                                    next_message_number
+                                ).execute(db_pool.as_ref()).await {
+                                    Ok(_) => info!("Successfully saved user message for continuation"),
+                                    Err(e) => info!("Error saving user message for continuation: {}", e)
+                                }
+
+                                // Add the new message to the previous messages for the API request
+                                previous_messages.push(continue_convo.new_message.clone());
+
+                                (previous_messages, continue_convo.conversation_id)
                             }
-                            ChatType::NewConvo(new_convo) => new_convo,
+                            ChatType::NewConvo(new_convo) => {
+                                info!("Starting new conversation");
+                                // Handle new conversation
+                                let messages = new_convo;
+
+                                // Create a new row in the conversations table
+                                let new_conversation_id = query!("INSERT INTO conversations DEFAULT VALUES")
+                                    .execute(db_pool.as_ref())
+                                    .await
+                                    .unwrap()
+                                    .last_insert_rowid();
+
+                                // Now, insert the user message(s) into the messages table
+                                let mut message_number: i64 = 0;
+                                for message in messages.iter() {
+                                    info!("Saving message: role={}, content={}", message.role, message.content);
+                                    match query!(
+                                        "INSERT INTO messages (conversation_id, role, content, message_number) VALUES (?, ?, ?, ?)",
+                                        new_conversation_id,
+                                        message.role,
+                                        message.content,
+                                        message_number
+                                    ).execute(db_pool.as_ref()).await {
+                                        Ok(_) => message_number += 1,
+                                        Err(e) => info!("Error saving message: {}", e)
+                                    }
+                                }
+
+                                // Return the messages and conversation ID
+                                (messages.clone(), ConvoId(new_conversation_id))
+                            }
                         };
 
                         // Build the request
@@ -213,6 +236,9 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
                         let sender_clone = Arc::clone(&sender);
                         let client = Arc::clone(&state.client);
 
+                        // Clone the database pool for the task
+                        
+                        let task_db_pool = Arc::clone(&state.db_pool);
                         // Spawn a task to make the request and handle the response
                         tokio::spawn(async move {
                             // Make the request to Ollama
@@ -226,22 +252,77 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
                                 Ok(response) => {
                                     // Create a separate task to stream the response
                                     let mut stream = response.bytes_stream();
-                                    
+                                    let mut complete_response: ChatMessage = ChatMessage { role: "bot".to_string(), content: String::new() };
+                                    let mut completed_safely: bool = false;
                                     while let Some(chunk) = stream.next().await {
                                         match chunk {
                                             Ok(bytes) => {
                                                 // Forward the response to the WebSocket client
                                                 if let Ok(text) = String::from_utf8(bytes.to_vec()) {
+                                                    let text_message = Message::Text((&text).into());
+
+                                                    // Try to parse the response to get content
+                                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                                                        // Check if this is the done message
+                                                        if let Some(done) = json.get("done") {
+                                                            if done.as_bool().unwrap_or(false) {
+                                                                completed_safely = true;
+                                                            }
+                                                        }
+
+                                                        // Extract content from the response
+                                                        if let Some(content) = json.get("content") {
+                                                            if let Some(content_str) = content.as_str() {
+                                                                complete_response.content.push_str(content_str);
+                                                            }
+                                                        } else if let Some(message) = json.get("message") {
+                                                            if let Some(content) = message.get("content") {
+                                                                if let Some(content_str) = content.as_str() {
+                                                                    complete_response.content.push_str(content_str);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
                                                     let mut lock = sender_clone.lock().await;
-                                                    if lock.send(Message::Text(text.into())).await.is_err() {
+                                                    if lock.send(text_message).await.is_err() {
+                                                        completed_safely = true;
                                                         break;
                                                     }
                                                 }
                                             }
                                             Err(e) => {
-                                                info!("Error streaming response: {}", e);
+                                                tracing::warn!("Error streaming response: {}", e);
                                                 break;
                                             }
+                                        }
+                                    }
+                                    // Save the bot's response to the database
+                                    // We count as completed either if we got a complete response or had a safe exit
+                                    if completed_safely {
+                                        // Save the bot's message to the database
+                                        // First, find the next message number for this conversation
+                                        let next_message_number = query!(
+                                            "SELECT MAX(message_number) as max_num FROM messages WHERE conversation_id = ?",
+                                            convo_id.0
+                                        )
+                                        .fetch_one(task_db_pool.as_ref())
+                                        .await
+                                        .map(|record| record.max_num.unwrap_or(0) + 1)
+                                        .unwrap_or(0);
+
+                                        // Save the bot's complete response
+                                        match query!(
+                                            "INSERT INTO messages (conversation_id, role, content, message_number) VALUES (?, ?, ?, ?)",
+                                            convo_id.0,
+                                            complete_response.role,
+                                            complete_response.content,
+                                            next_message_number
+                                        )
+                                        .execute(task_db_pool.as_ref())
+                                        .await {
+                                            Ok(_) => info!("Successfully saved bot message to database"),
+                                            Err(e) => info!("Error saving bot message: {}", e)
                                         }
                                     }
                                 }
@@ -251,7 +332,28 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
                                     let error_msg = serde_json::json!({
                                         "error": e.to_string()
                                     }).to_string();
-                                    
+
+                                    // Save the error as a system message in the database
+                                    let next_message_number = query!(
+                                        "SELECT MAX(message_number) as max_num FROM messages WHERE conversation_id = ?",
+                                        convo_id.0
+                                    )
+                                    .fetch_one(task_db_pool.as_ref())
+                                    .await
+                                    .map(|record| record.max_num.unwrap_or(0) + 1)
+                                    .unwrap_or(0);
+
+                                    let error_content = format!("Error: {}", e);
+                                    let _ = query!(
+                                        "INSERT INTO messages (conversation_id, role, content, message_number) VALUES (?, ?, ?, ?)",
+                                        convo_id.0,
+                                        "system",
+                                        error_content,
+                                        next_message_number
+                                    )
+                                    .execute(task_db_pool.as_ref())
+                                    .await;
+
                                     let mut lock = sender_clone.lock().await;
                                     let _ = lock.send(Message::Text(error_msg.into())).await;
                                 }

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MAX(message_number) as max_num FROM messages WHERE conversation_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "max_num",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "62f78c3ee578dbcfffbab27c65dee4776a2d40853e3d7da9ad5fb701ffc4e8ad"
+}

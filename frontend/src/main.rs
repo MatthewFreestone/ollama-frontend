@@ -1,6 +1,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use common::ConvoId;
+use common::{ChatMessage, ChatType, WsChatRequest};
 use serde_json::json;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -8,7 +10,6 @@ use web_sys::{
     Document, Element, HtmlButtonElement, HtmlSelectElement, HtmlTextAreaElement,
     MessageEvent, WebSocket,
 };
-use serde::Serialize;
 
 use web_sys::console;
 
@@ -34,6 +35,7 @@ struct AppState {
     connect_btn: HtmlButtonElement,
     disconnect_btn: HtmlButtonElement,
     clear_btn: HtmlButtonElement,
+    current_convo_id: Option<ConvoId>, // Track current conversation ID
     current_bot_message: Option<Element>, // Track current bot message for appending tokens
 }
 
@@ -82,6 +84,7 @@ impl AppState {
             connect_btn,
             disconnect_btn,
             clear_btn,
+            current_convo_id: None,
             current_bot_message: None,
         })
     }
@@ -357,26 +360,13 @@ impl AppState {
         self.add_message("You", &message, "user");
 
         // Create request payload
-        #[derive(Serialize)]
-        struct ChatMessage {
-            role: String,
-            content: String,
-        }
-
-        #[derive(Serialize)]
-        struct Payload {
-            model: String,
-            messages: Vec<ChatMessage>,
-            stream: bool,
-        }
-
-        let payload = Payload {
+        let payload = WsChatRequest {
             model,
-            messages: vec![ChatMessage {
+            chat_type: ChatType::NewConvo(vec![ChatMessage {
                 role: "user".to_string(),
                 content: message.to_string(),
-            }],
-            stream: true,
+            }]),
+            options: None,
         };
 
         // Send message to server
@@ -412,6 +402,7 @@ impl Clone for AppState {
             connect_btn: self.connect_btn.clone(),
             disconnect_btn: self.disconnect_btn.clone(),
             clear_btn: self.clear_btn.clone(),
+            current_convo_id: self.current_convo_id.clone(),
             current_bot_message: self.current_bot_message.clone(),
         }
     }
