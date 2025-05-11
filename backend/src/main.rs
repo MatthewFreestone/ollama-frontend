@@ -7,10 +7,9 @@ use axum::{
     routing::get,
     Router,
 };
-use common::{ChatMessage, ChatOptions, ChatType, ConvoId, WsChatRequest};
-use futures_util::{task, SinkExt, StreamExt};
+use common::{ChatMessage, ChatType, ConvoId, OllamaChatRequest, OllamaResponse, WsChatRequest};
+use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use sqlx::{migrate::MigrateDatabase, query, query_as, sqlite::SqlitePoolOptions, Sqlite};
 use std::{path::Path, sync::Arc};
 use tokio::sync::Mutex;
@@ -109,13 +108,7 @@ async fn websocket_handler(
 
 
 
-#[derive(Debug, Serialize, Deserialize)]
-struct OllamaChatRequest {
-    model: String,
-    messages: Vec<ChatMessage>,
-    stream: Option<bool>,
-    options: Option<ChatOptions>,
-}
+// We're now using the OllamaChatRequest struct from the common library
 
 
 async fn handle_websocket(socket: WebSocket, state: AppState) {
@@ -261,26 +254,18 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
                                                 if let Ok(text) = String::from_utf8(bytes.to_vec()) {
                                                     let text_message = Message::Text((&text).into());
 
-                                                    // Try to parse the response to get content
-                                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                                                    // Try to parse the response using our typed struct
+                                                    if let Ok(ollama_response) = serde_json::from_str::<OllamaResponse>(&text) {
                                                         // Check if this is the done message
-                                                        if let Some(done) = json.get("done") {
-                                                            if done.as_bool().unwrap_or(false) {
-                                                                completed_safely = true;
-                                                            }
+                                                        if ollama_response.done.unwrap_or(false) {
+                                                            completed_safely = true;
                                                         }
 
                                                         // Extract content from the response
-                                                        if let Some(content) = json.get("content") {
-                                                            if let Some(content_str) = content.as_str() {
-                                                                complete_response.content.push_str(content_str);
-                                                            }
-                                                        } else if let Some(message) = json.get("message") {
-                                                            if let Some(content) = message.get("content") {
-                                                                if let Some(content_str) = content.as_str() {
-                                                                    complete_response.content.push_str(content_str);
-                                                                }
-                                                            }
+                                                        if let Some(content) = ollama_response.content {
+                                                            complete_response.content.push_str(&content);
+                                                        } else if let Some(message) = ollama_response.message {
+                                                            complete_response.content.push_str(&message.content);
                                                         }
                                                     }
 
@@ -329,9 +314,24 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
                                 Err(e) => {
                                     // Send error message
                                     info!("Error sending request to Ollama: {}", e);
-                                    let error_msg = serde_json::json!({
-                                        "error": e.to_string()
-                                    }).to_string();
+
+                                    // Create a proper OllamaResponse with error
+                                    let ollama_error = OllamaResponse {
+                                        model: ollama_request.model.clone(),
+                                        created_at: None,
+                                        message: None,
+                                        done: Some(true),
+                                        total_duration: None,
+                                        load_duration: None,
+                                        prompt_eval_count: None,
+                                        prompt_eval_duration: None,
+                                        eval_count: None,
+                                        eval_duration: None,
+                                        content: None,
+                                        error: Some(e.to_string()),
+                                    };
+
+                                    let error_msg = serde_json::to_string(&ollama_error).unwrap();
 
                                     // Save the error as a system message in the database
                                     let next_message_number = query!(

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+// Request structs
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WsChatRequest {
     pub model: String,
@@ -34,4 +36,34 @@ pub struct ChatOptions {
     pub top_p: Option<f32>,
     pub top_k: Option<u32>,
     pub num_predict: Option<u32>,
+}
+
+// Ollama API response structs
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OllamaResponse {
+    pub model: String,
+    pub created_at: Option<String>,
+    pub message: Option<ChatMessage>,
+    pub done: Option<bool>,
+    pub total_duration: Option<u64>,
+    pub load_duration: Option<u64>,
+    pub prompt_eval_count: Option<u32>,
+    pub prompt_eval_duration: Option<u64>,
+    pub eval_count: Option<u32>,
+    pub eval_duration: Option<u64>,
+
+    // Fields for streaming responses
+    pub content: Option<String>,
+
+    // Fields for error responses
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OllamaChatRequest {
+    pub model: String,
+    pub messages: Vec<ChatMessage>,
+    pub stream: Option<bool>,
+    pub options: Option<ChatOptions>,
 }

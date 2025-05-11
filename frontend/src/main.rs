@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use common::ConvoId;
-use common::{ChatMessage, ChatType, WsChatRequest};
+use common::{ChatMessage, ChatType, OllamaResponse, WsChatRequest};
 use serde_json::json;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -199,56 +199,48 @@ impl AppState {
                             let txt_str = String::from(txt);
                             log(&format!("Received message: {}", &txt_str));
 
-                            match serde_json::from_str::<serde_json::Value>(&txt_str) {
-                                Ok(data) => {
-                                    log("Successfully parsed JSON data");
+                            match serde_json::from_str::<OllamaResponse>(&txt_str) {
+                                Ok(response) => {
+                                    log("Successfully parsed Ollama response");
 
                                     // Check if this is the done message indicating the stream is complete
-                                    if data.get("done").unwrap() == &json!(true) {
+                                    if response.done.unwrap_or(false) {
                                         log("Stream complete (done message received)");
                                         // Just leave the message as is, we're finished with this response
                                         return;
                                     }
 
-                                    if let Some(error) = data.get("error") {
-                                        if let Some(error_str) = error.as_str() {
-                                            log(&format!("Error message: {}", error_str));
-                                            app_state.add_message("Error", error_str, "error");
-                                        }
-                                    } else if let Some(message) = data.get("message") {
+                                    if let Some(error) = response.error {
+                                        log(&format!("Error message: {}", error));
+                                        app_state.add_message("Error", &error, "error");
+                                    } else if let Some(message) = response.message {
                                         log("Found message field in response");
-                                        if let Some(content) = message.get("content") {
-                                            if let Some(content_str) = content.as_str() {
-                                                log(&format!("Adding bot message: {}", content_str));
-                                                app_state.add_message("Bot", content_str, "bot");
-                                            }
-                                        }
-                                    } else if let Some(content) = data.get("content") {
+                                        log(&format!("Adding bot message: {}", message.content));
+                                        app_state.add_message("Bot", &message.content, "bot");
+                                    } else if let Some(content) = response.content {
                                         // Extract accumulated content
-                                        if let Some(content_str) = content.as_str() {
-                                            log(&format!("Streaming token: {}", content_str));
+                                        log(&format!("Streaming token: {}", content));
 
-                                            // For streaming tokens, we need to accumulate them
-                                            // Get the current message text if we have an active bot message
-                                            let current_text = match &app_state.current_bot_message {
-                                                Some(element) => {
-                                                    // Extract just the content part without the "Bot: " prefix
-                                                    element.text_content()
-                                                        .unwrap_or_default()
-                                                        .trim_start_matches("Bot: ")
-                                                        .to_string()
-                                                },
-                                                None => String::new()
-                                            };
+                                        // For streaming tokens, we need to accumulate them
+                                        // Get the current message text if we have an active bot message
+                                        let current_text = match &app_state.current_bot_message {
+                                            Some(element) => {
+                                                // Extract just the content part without the "Bot: " prefix
+                                                element.text_content()
+                                                    .unwrap_or_default()
+                                                    .trim_start_matches("Bot: ")
+                                                    .to_string()
+                                            },
+                                            None => String::new()
+                                        };
 
-                                            // Append the new token to the accumulated text
-                                            // Note: Ollama doesn't send complete words in chunks,
-                                            // so we need to append individual tokens and display
-                                            app_state.add_message("Bot", &(current_text.to_string() + content_str), "bot");
-                                        }
+                                        // Append the new token to the accumulated text
+                                        // Note: Ollama doesn't send complete words in chunks,
+                                        // so we need to append individual tokens and display
+                                        app_state.add_message("Bot", &(current_text.to_string() + &content), "bot");
                                     } else {
                                         // Unknown format, just display as is
-                                        log("Unknown message format, displaying raw JSON");
+                                        log("Unknown response format, displaying raw JSON");
                                         app_state.add_message("Bot", &txt_str, "bot");
                                     }
                                 }
