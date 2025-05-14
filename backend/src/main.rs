@@ -11,7 +11,7 @@ use common::{ChatMessage, ChatType, ConvoId, OllamaChatRequest, OllamaResponse, 
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use sqlx::{migrate::MigrateDatabase, query, query_as, sqlite::SqlitePoolOptions, Sqlite};
-use std::{path::Path, result, sync::Arc};
+use std::{path::Path, sync::Arc};
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{info, Level};
@@ -275,16 +275,25 @@ async fn login_handler(
             }),
         ));
     }
+    // For some reason, sqlx says that user.id is optional, but it is not
+    let user_id = user.id.ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: "User ID not found".to_string(),
+            }),
+        )
+    })?;
 
     // Generate an auth token
-    let token = generate_token(user.id, &state).await?;
+    let token = generate_token(user_id, &state).await?;
 
     // Return the user and token
     Ok((
         StatusCode::OK,
         Json(AuthResponse {
             user: auth::User {
-                id: user.id,
+                id: user_id,
                 username: user.username,
             },
             token: token.token,
@@ -370,20 +379,17 @@ async fn handle_websocket(socket: WebSocket, state: AppState, user_id: Option<i6
 
                                     match conversation {
                                         Ok(Some(convo)) => {
-                                            // If conversation has an owner (not null user_id)
-                                            if let Some(convo_user_id) = convo.user_id {
-                                                // Check if the authenticated user owns this conversation
-                                                if convo_user_id != uid {
-                                                    info!("Unauthorized access attempt to conversation {}", continue_convo.conversation_id.0);
-                                                    // Send error message for unauthorized access
-                                                    let error_msg = serde_json::json!({
-                                                        "error": "You do not have permission to access this conversation"
-                                                    }).to_string();
+                                            // Check if the authenticated user owns this conversation
+                                            if convo.user_id != uid {
+                                                info!("Unauthorized access attempt to conversation {}", continue_convo.conversation_id.0);
+                                                // Send error message for unauthorized access
+                                                let error_msg = serde_json::json!({
+                                                    "error": "You do not have permission to access this conversation"
+                                                }).to_string();
 
-                                                    let mut lock = sender.lock().await;
-                                                    let _ = lock.send(Message::Text(error_msg.into())).await;
-                                                    return;
-                                                }
+                                                let mut lock = sender.lock().await;
+                                                let _ = lock.send(Message::Text(error_msg.into())).await;
+                                                return;
                                             }
                                         },
                                         _ => {

@@ -3,7 +3,7 @@ use argon2::{
     Argon2,
 };
 use axum::{
-    extract::{FromRef, FromRequestParts, State},
+    extract::{FromRef, FromRequestParts},
     http::{request::Parts, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -228,7 +228,7 @@ where
         })?;
 
         Ok(AuthUser(User {
-            id: user.id,
+            id: user.id.unwrap(),
             username: user.username,
         }))
     }
