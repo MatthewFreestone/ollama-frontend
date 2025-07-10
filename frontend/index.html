@@ -3,47 +3,67 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ollama WebSocket WASM Client</title>
+    <title>Ollama WS WASM Client</title>
     <link data-trunk rel="scss" href="index.scss" />
     <link data-trunk rel="rust" />
 </head>
 <body>
-    <h1>Ollama WebSocket Chat</h1>
-    <div class="container">
-        <div class="auth-section">
-            <div id="login-form" class="auth-form">
-                <h3>Login</h3>
-                <input type="text" id="username-input" placeholder="Username" />
-                <input type="password" id="password-input" placeholder="Password" />
-                <button id="login-btn">Login</button>
-                <button id="signup-btn">Sign Up</button>
+    <div class="app">
+        <div class="sidebar">
+            <h2>WASM Ollama Interface</h2>
+            
+            <!-- Auth Section -->
+            <div class="auth-section">
+                <div id="login-form" class="auth-form">
+                    <h3>You are not logged in</h3>
+                    <input type="text" id="username-input" placeholder="Username" />
+                    <input type="password" id="password-input" placeholder="Password" />
+                    <div class="auth-buttons">
+                        <button id="login-btn">Login</button>
+                        <button id="signup-btn">Sign Up</button>
+                    </div>
+                </div>
+                <div id="user-info" class="auth-info" style="display: none;">
+                    <div id="username-display"></div>
+                    <button id="logout-btn">Logout</button>
+                </div>
             </div>
-            <div id="user-info" class="auth-info" style="display: none;">
-                <span id="username-display"></span>
-                <button id="logout-btn">Logout</button>
+            
+            <!-- Conversation List -->
+            <div class="conversation-section">
+                <h3>Conversations</h3>
+                <div id="conversation-list" class="conversation-list">
+                    <!-- Conversation items will be added here -->
+                </div>
+                <button id="new-conversation-btn" class="new-conversation-btn">+ New Conversation</button>
             </div>
         </div>
-        <div>
-            <label for="model-select">Model:</label>
-            <select id="model-select">
-                <option value="phi4">phi4</option>
-                <option value="llama3">llama3</option>
-                <option value="gemma">gemma</option>
-            </select>
-        </div>
-        <div>
-            <label for="input-message">Your Message:</label>
-            <textarea id="input-message" placeholder="Type your message here..."></textarea>
-        </div>
-        <div class="controls">
-            <button id="send-btn">Send Message</button>
-            <button id="clear-btn">Clear Chat</button>
-            <button id="connect-btn">Connect</button>
-            <button id="disconnect-btn">Disconnect</button>
-        </div>
-        <div>
-            <h3>Messages:</h3>
-            <div id="messages"></div>
+        
+        <div class="main-content">
+            <div class="chat-header">
+                <div class="chat-controls">
+                    <label for="model-select">Model:</label>
+                    <select id="model-select">
+                        <option value="phi4">phi4</option>
+                        <option value="llama3">llama3</option>
+                        <option value="gemma">gemma</option>
+                    </select>
+                    <div class="connection-controls">
+                        <button id="connect-btn">Connect</button>
+                        <button id="disconnect-btn">Disconnect</button>
+                        <button id="clear-btn">Clear Chat</button>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="chat-messages">
+                <div id="messages"></div>
+            </div>
+            
+            <div class="chat-input">
+                <textarea id="input-message" placeholder="Type your message here..."></textarea>
+                <button id="send-btn">Send</button>
+            </div>
         </div>
     </div>
 </body>

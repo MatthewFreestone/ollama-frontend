@@ -53,6 +53,8 @@ struct AppState {
     login_form: Element,
     user_info: Element,
     username_display: Element,
+    conversation_list: Element,
+    new_conversation_btn: HtmlButtonElement,
     current_convo_id: Option<ConvoId>, // Track current conversation ID
     current_bot_message: Option<Element>, // Track current bot message for appending tokens
 }
@@ -117,6 +119,13 @@ impl AppState {
         let username_display = document
             .get_element_by_id("username-display")
             .expect("No username display");
+        let conversation_list = document
+            .get_element_by_id("conversation-list")
+            .expect("No conversation list");
+        let new_conversation_btn = document
+            .get_element_by_id("new-conversation-btn")
+            .expect("No new conversation button")
+            .dyn_into::<HtmlButtonElement>()?;
 
         Ok(Self {
             ws_state: WebSocketState {
@@ -144,6 +153,8 @@ impl AppState {
             login_form,
             user_info,
             username_display,
+            conversation_list,
+            new_conversation_btn,
             current_convo_id: None,
             current_bot_message: None,
         })
@@ -677,6 +688,8 @@ impl Clone for AppState {
             login_form: self.login_form.clone(),
             user_info: self.user_info.clone(),
             username_display: self.username_display.clone(),
+            conversation_list: self.conversation_list.clone(),
+            new_conversation_btn: self.new_conversation_btn.clone(),
             current_convo_id: self.current_convo_id,
             current_bot_message: self.current_bot_message.clone(),
         }
@@ -871,6 +884,21 @@ pub fn main() -> Result<(), JsValue> {
         
         app_state.borrow().logout_btn.set_onclick(Some(logout_callback.as_ref().unchecked_ref()));
         logout_callback.forget();
+    }
+    
+    // Set up new conversation button event listener
+    {
+        let app_state_clone = Rc::clone(&app_state);
+        let new_conversation_callback: Closure<dyn FnMut(JsValue) + 'static> = Closure::new(move |_| {
+            log("New conversation button clicked");
+            if let Ok(mut app_state) = app_state_clone.try_borrow_mut() {
+                app_state.clear_chat();
+                app_state.add_message("System", "New conversation started", "bot");
+            }
+        });
+        
+        app_state.borrow().new_conversation_btn.set_onclick(Some(new_conversation_callback.as_ref().unchecked_ref()));
+        new_conversation_callback.forget();
     }
 
     // Update initial button states and auth UI
