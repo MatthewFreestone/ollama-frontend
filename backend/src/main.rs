@@ -10,8 +10,9 @@ use axum::{
 };
 use common::{
     ApiError, AuthResponse, ChatMessage, ChatType, ConvoId, LoginRequest, OllamaChatRequest,
-    OllamaResponse, SignupRequest, WsChatRequest, WsResponse,
+    OllamaResponse, SignupRequest, WsChatRequest, WsResponse, Conversation, ConversationsResponse,
 };
+use jiff::Zoned;
 use serde::Deserialize;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
@@ -66,6 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/auth/signup", post(signup_handler))
         .route("/api/auth/login", post(login_handler))
         .route("/api/auth/logout", post(logout_handler))
+        .route("/api/conversations", get(get_conversations_handler))
         .layer(cors)
         .with_state(AppState {
             client,
@@ -336,6 +338,109 @@ async fn logout_handler(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn get_conversations_handler(
+    headers: axum::http::HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<ConversationsResponse>, (StatusCode, Json<ApiError>)> {
+    // Extract the token from headers
+    let token = auth::extract_token_from_headers(&headers).ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ApiError {
+                error: "Missing authentication token".to_string(),
+            }),
+        )
+    })?;
+
+    // Verify the token and get user ID
+    let user_id = query!(
+        r#"
+        SELECT u.id
+        FROM users u
+        JOIN auth_tokens t ON u.id = t.user_id
+        WHERE t.token = ?
+          AND t.is_revoked = 0
+        "#,
+        token
+    )
+    .fetch_optional(state.db_pool.as_ref())
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: format!("Database error: {}", e),
+            }),
+        )
+    })?
+    .ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ApiError {
+                error: "Invalid or expired token".to_string(),
+            }),
+        )
+    })?;
+
+    let user_id = user_id.id.ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: "User ID not found".to_string(),
+            }),
+        )
+    })?;
+
+    // Get conversations for this user
+    let conversations = query!(
+        r#"
+        SELECT id, user_id, created_at, updated_at,
+               (SELECT content FROM messages WHERE conversation_id = conversations.id ORDER BY message_number LIMIT 1) as first_message
+        FROM conversations 
+        WHERE user_id = ? 
+        ORDER BY updated_at DESC
+        "#,
+        user_id
+    )
+    .fetch_all(state.db_pool.as_ref())
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: format!("Failed to fetch conversations: {}", e),
+            }),
+        )
+    })?;
+
+    let conversations: Vec<Conversation> = conversations
+        .into_iter()
+        .map(|row| {
+            // Generate title from first message or use default
+            let title = row.first_message
+                .map(|msg| {
+                    let truncated = if msg.len() > 50 {
+                        format!("{}...", &msg[..47])
+                    } else {
+                        msg
+                    };
+                    truncated
+                })
+                .unwrap_or_else(|| "New Conversation".to_string());
+
+            Conversation {
+                id: row.id,
+                user_id: row.user_id,
+                title: Some(title),
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+            }
+        })
+        .collect();
+
+    Ok(Json(ConversationsResponse { conversations }))
+}
+
 async fn handle_websocket(socket: WebSocket, state: AppState, user_id: Option<i64>) {
     info!("WebSocket connection established");
     if let Some(uid) = user_id {
@@ -474,18 +579,11 @@ async fn handle_websocket(socket: WebSocket, state: AppState, user_id: Option<i6
                                 info!("Starting new conversation");
                                 // Handle new conversation
                                 let messages = new_convo;
-
+                                let created_at = Zoned::now().timestamp().as_second();
                                 // Create a new row in the conversations table
-                                let new_conversation_id = if let Some(uid) = user_id {
-                                    // If authenticated, associate conversation with user
-                                    query!("INSERT INTO conversations (user_id) VALUES (?)", uid)
-                                        .execute(db_pool.as_ref())
-                                        .await
-                                        .unwrap()
-                                        .last_insert_rowid()
-                                } else {
-                                    // For unauthenticated users
-                                    query!("INSERT INTO conversations DEFAULT VALUES")
+                                let new_conversation_id = {
+                                    let uid_opt = user_id;
+                                    query!("INSERT INTO conversations (user_id, created_at, updated_at) VALUES (?, ?, ?)", uid_opt, created_at, created_at)
                                         .execute(db_pool.as_ref())
                                         .await
                                         .unwrap()

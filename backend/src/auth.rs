@@ -3,12 +3,10 @@ use argon2::{
     Argon2,
 };
 use axum::{
-    // extract::{FromRef, FromRequestParts},
-    http::{request::Parts, HeaderMap, StatusCode},
-    // response::{IntoResponse, Response},
+    http::{HeaderMap, StatusCode},
     Json,
 };
-use common::{ApiError, AuthToken, User, TOKEN_HEADER};
+use common::{ApiError, AuthToken, TOKEN_HEADER};
 use sqlx::query;
 use jiff::{Timestamp, ToSpan, Zoned};
 use uuid::Uuid;

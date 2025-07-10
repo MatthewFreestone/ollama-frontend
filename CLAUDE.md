@@ -3,7 +3,7 @@
 ## Build Commands
 - Build backend: `cd backend && cargo build`
 - Build frontend: `cd frontend && cargo build`
-- Build frontend wasm: `cd frontend && wasm-pack build --target web`
+- Build frontend wasm: `cd frontend && trunk build --release`
 - Run backend: `cd backend && cargo run`
 - Run frontend dev server: `cd frontend && trunk serve`
 

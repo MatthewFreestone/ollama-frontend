@@ -123,3 +123,17 @@ pub struct AuthResponse {
 pub struct ApiError {
     pub error: String,
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Conversation {
+    pub id: i64,
+    pub user_id: Option<i64>,
+    pub title: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ConversationsResponse {
+    pub conversations: Vec<Conversation>,
+}

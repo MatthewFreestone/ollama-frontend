@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use common::{ContinueConvo, ConvoId};
-use common::{ChatMessage, ChatType, WsChatRequest, WsResponse, LoginRequest, SignupRequest, AuthResponse, ApiError, TOKEN_HEADER};
+use common::{ChatMessage, ChatType, WsChatRequest, WsResponse, LoginRequest, SignupRequest, AuthResponse, ApiError, TOKEN_HEADER, Conversation, ConversationsResponse};
 use gloo_utils::format::JsValueSerdeExt;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -33,10 +33,17 @@ struct AuthState {
     token: Option<String>,
 }
 
+// Conversation state
+struct ConversationState {
+    conversations: Vec<Conversation>,
+    active_conversation_id: Option<i64>,
+}
+
 // Global state
 struct AppState {
     ws_state: WebSocketState,
     auth_state: AuthState,
+    conversation_state: ConversationState,
     document: Document,
     messages_div: Element,
     input_message: HtmlTextAreaElement,
@@ -136,6 +143,10 @@ impl AppState {
                 user_id: None,
                 username: None,
                 token: None,
+            },
+            conversation_state: ConversationState {
+                conversations: Vec::new(),
+                active_conversation_id: None,
             },
             document,
             messages_div,
@@ -474,6 +485,9 @@ impl AppState {
             // Update UI
             self.update_auth_ui();
             
+            // Load conversations after successful login
+            let _ = self.load_conversations().await;
+            
             self.add_message("System", "Login successful!", "bot");
             log("Login successful");
         } else {
@@ -531,6 +545,9 @@ impl AppState {
             // Update UI
             self.update_auth_ui();
             
+            // Load conversations after successful signup
+            let _ = self.load_conversations().await;
+            
             self.add_message("System", "Signup successful!", "bot");
             log("Signup successful");
         } else {
@@ -569,6 +586,11 @@ impl AppState {
         self.auth_state.username = None;
         self.auth_state.token = None;
         
+        // Clear conversation state
+        self.conversation_state.conversations.clear();
+        self.conversation_state.active_conversation_id = None;
+        self.populate_conversation_list();
+        
         // Update UI
         self.update_auth_ui();
         
@@ -581,6 +603,104 @@ impl AppState {
         log("Logout successful");
         
         Ok(())
+    }
+    
+    // Initialize app on page load - like React useEffect with empty dependency array
+    async fn initialize_on_load(&mut self) {
+        log("Initializing app on page load...");
+        
+        // Load conversations if user is authenticated
+        if self.auth_state.token.is_some() {
+            let _ = self.load_conversations().await;
+        } else {
+            log("User not authenticated, skipping conversation loading");
+        }
+        
+        log("App initialization complete");
+    }
+    
+    // Load conversations from backend API
+    async fn load_conversations(&mut self) -> Result<(), JsValue> {
+        log("Loading conversations from backend...");
+        
+        let token = match &self.auth_state.token {
+            Some(token) => token,
+            None => {
+                log("No auth token available");
+                return Ok(());
+            }
+        };
+        
+        let opts = RequestInit::new();
+        opts.set_method("GET");
+        
+        let headers = Headers::new()?;
+        headers.set(TOKEN_HEADER, token)?;
+        opts.set_headers(&headers);
+        
+        let request = Request::new_with_str_and_init(
+            "http://localhost:3000/api/conversations",
+            &opts
+        )?;
+        
+        let window = web_sys::window().unwrap();
+        let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
+        let resp: Response = resp_value.dyn_into().unwrap();
+        
+        if resp.ok() {
+            let json = JsFuture::from(resp.json()?).await?;
+            let conversations_response: ConversationsResponse = json.into_serde()
+                .map_err(|e| JsValue::from_str(&format!("JSON parse error: {}", e)))?;
+            
+            // Update conversation state
+            self.conversation_state.conversations = conversations_response.conversations;
+            
+            // Update UI
+            self.populate_conversation_list();
+            
+            log(&format!("Loaded {} conversations", self.conversation_state.conversations.len()));
+        } else {
+            let json = JsFuture::from(resp.json()?).await?;
+            let error_response: ApiError = json.into_serde()
+                .map_err(|e| JsValue::from_str(&format!("JSON parse error: {}", e)))?;
+            
+            log(&format!("Failed to load conversations: {}", error_response.error));
+        }
+        
+        Ok(())
+    }
+    
+    // Populate the conversation list in the UI
+    fn populate_conversation_list(&self) {
+        // Clear existing conversation items
+        self.conversation_list.set_inner_html("");
+        
+        if self.conversation_state.conversations.is_empty() {
+            let empty_message = self.document.create_element("div").unwrap();
+            empty_message.set_class_name("conversation-empty");
+            empty_message.set_text_content(Some("No conversations yet"));
+            let _ = self.conversation_list.append_child(&empty_message);
+            return;
+        }
+        
+        // Add conversation items
+        for conversation in &self.conversation_state.conversations {
+            let conversation_item = self.document.create_element("div").unwrap();
+            conversation_item.set_class_name("conversation-item");
+            
+            let title = conversation.title.as_deref().unwrap_or("Untitled Conversation");
+            conversation_item.set_text_content(Some(title));
+            
+            // Add data attribute for conversation ID
+            conversation_item.set_attribute("data-conversation-id", &conversation.id.to_string()).unwrap();
+            
+            // Mark as active if this is the current conversation
+            if Some(conversation.id) == self.conversation_state.active_conversation_id {
+                conversation_item.class_list().add_1("active").unwrap();
+            }
+            
+            let _ = self.conversation_list.append_child(&conversation_item);
+        }
     }
 
     // Disconnect from WebSocket server
@@ -671,6 +791,10 @@ impl Clone for AppState {
                 user_id: self.auth_state.user_id,
                 username: self.auth_state.username.clone(),
                 token: self.auth_state.token.clone(),
+            },
+            conversation_state: ConversationState {
+                conversations: self.conversation_state.conversations.clone(),
+                active_conversation_id: self.conversation_state.active_conversation_id,
             },
             document: self.document.clone(),
             messages_div: self.messages_div.clone(),
@@ -899,6 +1023,16 @@ pub fn main() -> Result<(), JsValue> {
         
         app_state.borrow().new_conversation_btn.set_onclick(Some(new_conversation_callback.as_ref().unchecked_ref()));
         new_conversation_callback.forget();
+    }
+    
+    // Initialize app state - like React useEffect with empty dependency array
+    {
+        let app_state_clone = Rc::clone(&app_state);
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Ok(mut app_state) = app_state_clone.try_borrow_mut() {
+                app_state.initialize_on_load().await;
+            }
+        });
     }
 
     // Update initial button states and auth UI
