@@ -2,13 +2,16 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use common::{ContinueConvo, ConvoId};
-use common::{ChatMessage, ChatType, WsChatRequest, WsResponse};
+use common::{ChatMessage, ChatType, WsChatRequest, WsResponse, LoginRequest, SignupRequest, AuthResponse, ApiError, TOKEN_HEADER};
+use gloo_utils::format::JsValueSerdeExt;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    Document, Element, HtmlButtonElement, HtmlSelectElement, HtmlTextAreaElement,
-    MessageEvent, WebSocket,
+    Document, Element, HtmlButtonElement, HtmlSelectElement, HtmlTextAreaElement, HtmlInputElement,
+    MessageEvent, WebSocket, Request, RequestInit, Response, Headers,
 };
+use serde_json;
 
 use web_sys::console;
 
@@ -23,9 +26,17 @@ struct WebSocketState {
     connected: bool,
 }
 
+// Authentication state
+struct AuthState {
+    user_id: Option<i64>,
+    username: Option<String>,
+    token: Option<String>,
+}
+
 // Global state
 struct AppState {
     ws_state: WebSocketState,
+    auth_state: AuthState,
     document: Document,
     messages_div: Element,
     input_message: HtmlTextAreaElement,
@@ -34,6 +45,14 @@ struct AppState {
     connect_btn: HtmlButtonElement,
     disconnect_btn: HtmlButtonElement,
     clear_btn: HtmlButtonElement,
+    username_input: HtmlInputElement,
+    password_input: HtmlInputElement,
+    login_btn: HtmlButtonElement,
+    signup_btn: HtmlButtonElement,
+    logout_btn: HtmlButtonElement,
+    login_form: Element,
+    user_info: Element,
+    username_display: Element,
     current_convo_id: Option<ConvoId>, // Track current conversation ID
     current_bot_message: Option<Element>, // Track current bot message for appending tokens
 }
@@ -69,11 +88,45 @@ impl AppState {
             .get_element_by_id("clear-btn")
             .expect("No clear button")
             .dyn_into::<HtmlButtonElement>()?;
+        let username_input = document
+            .get_element_by_id("username-input")
+            .expect("No username input")
+            .dyn_into::<HtmlInputElement>()?;
+        let password_input = document
+            .get_element_by_id("password-input")
+            .expect("No password input")
+            .dyn_into::<HtmlInputElement>()?;
+        let login_btn = document
+            .get_element_by_id("login-btn")
+            .expect("No login button")
+            .dyn_into::<HtmlButtonElement>()?;
+        let signup_btn = document
+            .get_element_by_id("signup-btn")
+            .expect("No signup button")
+            .dyn_into::<HtmlButtonElement>()?;
+        let logout_btn = document
+            .get_element_by_id("logout-btn")
+            .expect("No logout button")
+            .dyn_into::<HtmlButtonElement>()?;
+        let login_form = document
+            .get_element_by_id("login-form")
+            .expect("No login form");
+        let user_info = document
+            .get_element_by_id("user-info")
+            .expect("No user info");
+        let username_display = document
+            .get_element_by_id("username-display")
+            .expect("No username display");
 
         Ok(Self {
             ws_state: WebSocketState {
                 socket: None,
                 connected: false,
+            },
+            auth_state: AuthState {
+                user_id: None,
+                username: None,
+                token: None,
             },
             document,
             messages_div,
@@ -83,18 +136,42 @@ impl AppState {
             connect_btn,
             disconnect_btn,
             clear_btn,
+            username_input,
+            password_input,
+            login_btn,
+            signup_btn,
+            logout_btn,
+            login_form,
+            user_info,
+            username_display,
             current_convo_id: None,
             current_bot_message: None,
         })
     }
 
-    // Update button states based on connection status
+    // Update button states based on connection status and authentication
     fn update_buttons(&self) {
         log(&format!("Updating button states, connected: {}", self.ws_state.connected));
         self.send_btn.set_disabled(!self.ws_state.connected);
         self.connect_btn.set_disabled(self.ws_state.connected);
         self.disconnect_btn.set_disabled(!self.ws_state.connected);
         log("Button states updated");
+    }
+
+    // Update UI based on authentication state
+    fn update_auth_ui(&self) {
+        if self.auth_state.token.is_some() {
+            // User is logged in
+            let _ = self.login_form.set_attribute("style", "display: none;");
+            let _ = self.user_info.set_attribute("style", "display: block;");
+            if let Some(username) = &self.auth_state.username {
+                self.username_display.set_text_content(Some(&format!("Logged in as: {}", username)));
+            }
+        } else {
+            // User is not logged in
+            let _ = self.login_form.set_attribute("style", "display: block;");
+            let _ = self.user_info.set_attribute("style", "display: none;");
+        }
     }
 
     // Add a message to the chat
@@ -160,7 +237,19 @@ impl AppState {
         }
 
         log("Attempting to connect to WebSocket server...");
-        let socket = WebSocket::new("ws://localhost:3000/ws")?;
+        
+        // Build WebSocket URL with token if available
+        let ws_url = {
+            let app = app_state.borrow();
+            if let Some(token) = &app.auth_state.token {
+                log("Including authentication token in WebSocket URL");
+                format!("ws://localhost:3000/ws?token={}", token)
+            } else {
+                "ws://localhost:3000/ws".to_string()
+            }
+        };
+        
+        let socket = WebSocket::new(&ws_url)?;
         log("WebSocket object created successfully");
 
         // Set up onopen callback
@@ -330,6 +419,159 @@ impl AppState {
         Ok(())
     }
 
+    // Login method
+    async fn login(&mut self, username: &str, password: &str) -> Result<(), JsValue> {
+        log("Attempting to login...");
+        
+        let login_request = LoginRequest {
+            username: username.to_string(),
+            password: password.to_string(),
+        };
+        
+        let opts = RequestInit::new();
+        opts.set_method("POST");
+        // opts.mode(web_sys::RequestMode::Cors);
+        
+        let headers = Headers::new()?;
+        headers.set("Content-Type", "application/json")?;
+        opts.set_headers(&headers);
+        
+        let body = serde_json::to_string(&login_request)
+            .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))?;
+        opts.set_body(&JsValue::from_str(&body));
+
+        let request = Request::new_with_str_and_init("http://localhost:3000/api/auth/login", &opts)?;
+        
+        let window = web_sys::window().unwrap();
+        let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
+        let resp: Response = resp_value.dyn_into().unwrap();
+        
+        if resp.ok() {
+            let json = JsFuture::from(resp.json()?).await?;
+            let auth_response: AuthResponse = json.into_serde()
+                .map_err(|e| JsValue::from_str(&format!("JSON parse error: {}", e)))?;
+            
+            // Update auth state
+            self.auth_state.user_id = Some(auth_response.user.id);
+            self.auth_state.username = Some(auth_response.user.username);
+            self.auth_state.token = Some(auth_response.token);
+            
+            // Clear input fields
+            self.username_input.set_value("");
+            self.password_input.set_value("");
+            
+            // Update UI
+            self.update_auth_ui();
+            
+            self.add_message("System", "Login successful!", "bot");
+            log("Login successful");
+        } else {
+            let json = JsFuture::from(resp.json()?).await?;
+            let error_response: ApiError = json.into_serde()
+                .map_err(|e| JsValue::from_str(&format!("JSON parse error: {}", e)))?;
+            
+            self.add_message("Error", &format!("Login failed: {}", error_response.error), "error");
+            log(&format!("Login failed: {}", error_response.error));
+        }
+        
+        Ok(())
+    }
+    
+    // Signup method
+    async fn signup(&mut self, username: &str, password: &str) -> Result<(), JsValue> {
+        log("Attempting to signup...");
+        
+        let signup_request = SignupRequest {
+            username: username.to_string(),
+            password: password.to_string(),
+        };
+        
+        let opts = RequestInit::new();
+        opts.set_method("POST");
+        
+        let headers = Headers::new()?;
+        headers.set("Content-Type", "application/json")?;
+        opts.set_headers(&headers);
+        
+        let body = serde_json::to_string(&signup_request)
+            .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))?;
+        opts.set_body(&JsValue::from_str(&body));
+        
+        let request = Request::new_with_str_and_init("http://localhost:3000/api/auth/signup", &opts)?;
+        
+        let window = web_sys::window().unwrap();
+        let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
+        let resp: Response = resp_value.dyn_into().unwrap();
+        
+        if resp.ok() {
+            let json = JsFuture::from(resp.json()?).await?;
+            let auth_response: AuthResponse = json.into_serde()
+                .map_err(|e| JsValue::from_str(&format!("JSON parse error: {}", e)))?;
+            
+            // Update auth state
+            self.auth_state.user_id = Some(auth_response.user.id);
+            self.auth_state.username = Some(auth_response.user.username);
+            self.auth_state.token = Some(auth_response.token);
+            
+            // Clear input fields
+            self.username_input.set_value("");
+            self.password_input.set_value("");
+            
+            // Update UI
+            self.update_auth_ui();
+            
+            self.add_message("System", "Signup successful!", "bot");
+            log("Signup successful");
+        } else {
+            let json = JsFuture::from(resp.json()?).await?;
+            let error_response: ApiError = json.into_serde()
+                .map_err(|e| JsValue::from_str(&format!("JSON parse error: {}", e)))?;
+            
+            self.add_message("Error", &format!("Signup failed: {}", error_response.error), "error");
+            log(&format!("Signup failed: {}", error_response.error));
+        }
+        
+        Ok(())
+    }
+    
+    // Logout method
+    async fn logout(&mut self) -> Result<(), JsValue> {
+        log("Attempting to logout...");
+        
+        if let Some(token) = &self.auth_state.token {
+            let opts: RequestInit = RequestInit::new();
+            opts.set_method("POST");
+            // opts.mode(web_sys::RequestMode::Cors);
+            
+            let headers = Headers::new()?;
+            headers.set(TOKEN_HEADER, token)?;
+            opts.set_headers(&headers);
+            
+            let request = Request::new_with_str_and_init("http://localhost:3000/api/auth/logout", &opts)?;
+            
+            let window = web_sys::window().unwrap();
+            let _ = JsFuture::from(window.fetch_with_request(&request)).await?;
+        }
+        
+        // Clear auth state
+        self.auth_state.user_id = None;
+        self.auth_state.username = None;
+        self.auth_state.token = None;
+        
+        // Update UI
+        self.update_auth_ui();
+        
+        // Disconnect WebSocket if connected
+        if self.ws_state.connected {
+            self.disconnect();
+        }
+        
+        self.add_message("System", "Logged out successfully", "bot");
+        log("Logout successful");
+        
+        Ok(())
+    }
+
     // Disconnect from WebSocket server
     fn disconnect(&mut self) {
         log("Disconnect method called");
@@ -414,6 +656,11 @@ impl Clone for AppState {
                 socket: None, // Can't clone WebSocket
                 connected: self.ws_state.connected,
             },
+            auth_state: AuthState {
+                user_id: self.auth_state.user_id,
+                username: self.auth_state.username.clone(),
+                token: self.auth_state.token.clone(),
+            },
             document: self.document.clone(),
             messages_div: self.messages_div.clone(),
             input_message: self.input_message.clone(),
@@ -422,6 +669,14 @@ impl Clone for AppState {
             connect_btn: self.connect_btn.clone(),
             disconnect_btn: self.disconnect_btn.clone(),
             clear_btn: self.clear_btn.clone(),
+            username_input: self.username_input.clone(),
+            password_input: self.password_input.clone(),
+            login_btn: self.login_btn.clone(),
+            signup_btn: self.signup_btn.clone(),
+            logout_btn: self.logout_btn.clone(),
+            login_form: self.login_form.clone(),
+            user_info: self.user_info.clone(),
+            username_display: self.username_display.clone(),
             current_convo_id: self.current_convo_id,
             current_bot_message: self.current_bot_message.clone(),
         }
@@ -551,9 +806,77 @@ pub fn main() -> Result<(), JsValue> {
         log("Keydown callback forgotten");
     }
 
-    // Update initial button states
-    log("Updating initial button states");
+    // Set up login button event listener
+    {
+        let app_state_clone = Rc::clone(&app_state);
+        let login_callback: Closure<dyn FnMut(JsValue) + 'static> = Closure::new(move |_| {
+            log("Login button clicked");
+            let username = app_state_clone.borrow().username_input.value();
+            let password = app_state_clone.borrow().password_input.value();
+            
+            if username.trim().is_empty() || password.trim().is_empty() {
+                log("Username or password is empty");
+                return;
+            }
+            
+            let app_state_clone_inner = Rc::clone(&app_state_clone);
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Ok(mut app_state) = app_state_clone_inner.try_borrow_mut() {
+                    let _ = app_state.login(&username, &password).await;
+                }
+            });
+        });
+        
+        app_state.borrow().login_btn.set_onclick(Some(login_callback.as_ref().unchecked_ref()));
+        login_callback.forget();
+    }
+    
+    // Set up signup button event listener
+    {
+        let app_state_clone = Rc::clone(&app_state);
+        let signup_callback: Closure<dyn FnMut(JsValue) + 'static> = Closure::new(move |_| {
+            log("Signup button clicked");
+            let username = app_state_clone.borrow().username_input.value();
+            let password = app_state_clone.borrow().password_input.value();
+            
+            if username.trim().is_empty() || password.trim().is_empty() {
+                log("Username or password is empty");
+                return;
+            }
+            
+            let app_state_clone_inner = Rc::clone(&app_state_clone);
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Ok(mut app_state) = app_state_clone_inner.try_borrow_mut() {
+                    let _ = app_state.signup(&username, &password).await;
+                }
+            });
+        });
+        
+        app_state.borrow().signup_btn.set_onclick(Some(signup_callback.as_ref().unchecked_ref()));
+        signup_callback.forget();
+    }
+    
+    // Set up logout button event listener
+    {
+        let app_state_clone = Rc::clone(&app_state);
+        let logout_callback: Closure<dyn FnMut(JsValue) + 'static> = Closure::new(move |_| {
+            log("Logout button clicked");
+            let app_state_clone_inner = Rc::clone(&app_state_clone);
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Ok(mut app_state) = app_state_clone_inner.try_borrow_mut() {
+                    let _ = app_state.logout().await;
+                }
+            });
+        });
+        
+        app_state.borrow().logout_btn.set_onclick(Some(logout_callback.as_ref().unchecked_ref()));
+        logout_callback.forget();
+    }
+
+    // Update initial button states and auth UI
+    log("Updating initial button states and auth UI");
     app_state.borrow().update_buttons();
+    app_state.borrow().update_auth_ui();
     log("WASM initialization complete");
 
     Ok(())

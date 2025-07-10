@@ -10,6 +10,19 @@
 <body>
     <h1>Ollama WebSocket Chat</h1>
     <div class="container">
+        <div class="auth-section">
+            <div id="login-form" class="auth-form">
+                <h3>Login</h3>
+                <input type="text" id="username-input" placeholder="Username" />
+                <input type="password" id="password-input" placeholder="Password" />
+                <button id="login-btn">Login</button>
+                <button id="signup-btn">Sign Up</button>
+            </div>
+            <div id="user-info" class="auth-info" style="display: none;">
+                <span id="username-display"></span>
+                <button id="logout-btn">Logout</button>
+            </div>
+        </div>
         <div>
             <label for="model-select">Model:</label>
             <select id="model-select">

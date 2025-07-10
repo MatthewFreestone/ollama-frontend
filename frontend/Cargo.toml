@@ -25,7 +25,11 @@ web-sys = { version = "0.3", features = [
     "MessageEvent",
     "CloseEvent",
     "ErrorEvent",
-    "console"
+    "console",
+    "Request",
+    "RequestInit",
+    "Response",
+    "Headers"
 ]}
 wasm-bindgen-futures = "0.4"
 serde = { version = "1.0", features = ["derive"] }

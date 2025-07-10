@@ -1,7 +1,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        State, Query,
     },
     http::StatusCode,
     response::IntoResponse,
@@ -12,6 +12,7 @@ use common::{
     ApiError, AuthResponse, ChatMessage, ChatType, ConvoId, LoginRequest, OllamaChatRequest,
     OllamaResponse, SignupRequest, WsChatRequest, WsResponse,
 };
+use serde::Deserialize;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use sqlx::{migrate::MigrateDatabase, query, query_as, sqlite::SqlitePoolOptions, Sqlite};
@@ -86,14 +87,22 @@ struct AppState {
     db_pool: Arc<sqlx::SqlitePool>,
 }
 
+#[derive(Deserialize)]
+struct WebSocketQuery {
+    token: Option<String>,
+}
+
 // WebSocket handler
 async fn websocket_handler(
     ws: WebSocketUpgrade,
     headers: axum::http::HeaderMap,
+    Query(query): Query<WebSocketQuery>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    // Extract the token from headers
-    let user_id: Option<i64> = if let Some(token) = auth::extract_token_from_headers(&headers) {
+    // Extract the token from headers or query parameters
+    let token = auth::extract_token_from_headers(&headers).or(query.token);
+    
+    let user_id: Option<i64> = if let Some(token) = token {
         info!("WebSocket connection with token: {}", token);
         let foo = query!(
             r#"
@@ -126,6 +135,7 @@ async fn signup_handler(
     Json(req): Json<SignupRequest>,
 ) -> Result<(StatusCode, Json<AuthResponse>), (StatusCode, Json<ApiError>)> {
     // Validate username and password
+    info!("Received signup request for username: {}", req.username);
     if req.username.trim().is_empty() || req.username.len() < 1 {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -158,6 +168,7 @@ async fn signup_handler(
         })?;
 
     if existing_user.is_some() {
+        info!("Username already exists: {}", req.username);
         return Err((
             StatusCode::CONFLICT,
             Json(ApiError {
@@ -206,6 +217,8 @@ async fn signup_handler(
         })?
         .id;
 
+    info!("User created successfully: {}", user_id);
+
     // Generate an auth token
     let token = generate_token(user_id, &state).await?;
 
@@ -243,6 +256,7 @@ async fn login_handler(
     })?;
 
     let user = user.ok_or_else(|| {
+        info!("Invalid login attempt for username: {}", req.username);
         (
             StatusCode::UNAUTHORIZED,
             Json(ApiError {
@@ -260,6 +274,7 @@ async fn login_handler(
     })?;
 
     if !password_valid {
+        info!("Invalid password for username: {}", req.username);
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(ApiError {
@@ -279,7 +294,7 @@ async fn login_handler(
 
     // Generate an auth token
     let token = generate_token(user_id, &state).await?;
-
+    info!("User logged in successfully: {}", user_id);
     // Return the user and token
     Ok((
         StatusCode::OK,
