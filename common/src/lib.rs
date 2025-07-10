@@ -1,3 +1,4 @@
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 // Request structs
@@ -80,4 +81,45 @@ pub struct WsResponse {
 
     // Field to indicate if this is the final response in a stream
     pub is_final: Option<bool>,
+}
+
+pub const TOKEN_HEADER: &str = "X-Auth-Token";
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct User {
+    pub id: i64,
+    pub username: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AuthToken {
+    pub id: i64,
+    pub user_id: i64,
+    pub token: String,
+    pub created_at: Timestamp,
+    pub expires_at: Timestamp,
+    pub is_revoked: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignupRequest {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LoginRequest {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AuthResponse {
+    pub user: User,
+    pub token: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ApiError {
+    pub error: String,
 }

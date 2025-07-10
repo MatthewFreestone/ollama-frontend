@@ -3,11 +3,15 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
+    http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
-    Router, Json, http::StatusCode,
+    Json, Router,
 };
-use common::{ChatMessage, ChatType, ConvoId, OllamaChatRequest, OllamaResponse, WsChatRequest, WsResponse};
+use common::{
+    ApiError, AuthResponse, ChatMessage, ChatType, ConvoId, LoginRequest, OllamaChatRequest,
+    OllamaResponse, SignupRequest, WsChatRequest, WsResponse,
+};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use sqlx::{migrate::MigrateDatabase, query, query_as, sqlite::SqlitePoolOptions, Sqlite};
@@ -18,10 +22,7 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 mod auth;
-use auth::{
-    AuthResponse, ApiError, AuthUser, LoginRequest, SignupRequest,
-    hash_password, verify_password, generate_token
-};
+use auth::{generate_token, hash_password, verify_password};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -30,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_level(Level::INFO)
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
-    
+
     info!("Starting Ollama frontend server");
     let db_path = "database.db";
     let db_url = format!("sqlite://{}", db_path);
@@ -42,14 +43,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Create a connection pool
-    let db_pool = SqlitePoolOptions::new()
-        .connect(&db_url)
-        .await?;
+    let db_pool = SqlitePoolOptions::new().connect(&db_url).await?;
 
     // Apply migrations
-    sqlx::migrate!("./migrations")
-        .run(&db_pool)
-        .await?;
+    sqlx::migrate!("./migrations").run(&db_pool).await?;
 
     // Your application logic here
 
@@ -69,10 +66,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/auth/login", post(login_handler))
         .route("/api/auth/logout", post(logout_handler))
         .layer(cors)
-        .with_state(AppState { client, db_pool: arced_db_pool });
+        .with_state(AppState {
+            client,
+            db_pool: arced_db_pool,
+        });
 
     // Start the server
-    let listener = tokio::net::TcpListener::bind("localhost:3000").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("localhost:3000")
+        .await
+        .unwrap();
     info!("Listening on http://localhost:3000");
     axum::serve(listener, app).await?;
     Ok(())
@@ -93,20 +95,20 @@ async fn websocket_handler(
     // Extract the token from headers
     let user_id: Option<i64> = if let Some(token) = auth::extract_token_from_headers(&headers) {
         info!("WebSocket connection with token: {}", token);
-        let foo  = query!(
-                r#"
+        let foo = query!(
+            r#"
                 SELECT u.id
                 FROM users u
                 JOIN auth_tokens t ON u.id = t.user_id
                 WHERE t.token = ?
                   AND t.is_revoked = 0
                 "#,
-                token
-            )
-            .fetch_optional(state.db_pool.as_ref())
-            .await
-            .ok()
-            .flatten();
+            token
+        )
+        .fetch_optional(state.db_pool.as_ref())
+        .await
+        .ok()
+        .flatten();
         foo.and_then(|user| user.id)
     } else {
         info!("WebSocket connection without token");
@@ -116,10 +118,7 @@ async fn websocket_handler(
     ws.on_upgrade(move |socket| handle_websocket(socket, state, user_id))
 }
 
-
-
 // We're now using the OllamaChatRequest struct from the common library
-
 
 // Authentication handlers
 async fn signup_handler(
@@ -171,9 +170,7 @@ async fn signup_handler(
     let password_hash = hash_password(&req.password).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError {
-                error: e,
-            }),
+            Json(ApiError { error: e }),
         )
     })?;
 
@@ -196,21 +193,18 @@ async fn signup_handler(
     .last_insert_rowid();
 
     // Verify the user was created
-    let user_id = query!(
-        "SELECT id FROM users WHERE id = ?",
-        user_id
-    )
-    .fetch_one(state.db_pool.as_ref())
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError {
-                error: format!("Failed to create user: {}", e),
-            }),
-        )
-    })?
-    .id;
+    let user_id = query!("SELECT id FROM users WHERE id = ?", user_id)
+        .fetch_one(state.db_pool.as_ref())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: format!("Failed to create user: {}", e),
+                }),
+            )
+        })?
+        .id;
 
     // Generate an auth token
     let token = generate_token(user_id, &state).await?;
@@ -219,7 +213,7 @@ async fn signup_handler(
     Ok((
         StatusCode::CREATED,
         Json(AuthResponse {
-            user: auth::User {
+            user: common::User {
                 id: user_id,
                 username: req.username,
             },
@@ -261,9 +255,7 @@ async fn login_handler(
     let password_valid = verify_password(&req.password, &user.password_hash).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError {
-                error: e,
-            }),
+            Json(ApiError { error: e }),
         )
     })?;
 
@@ -292,7 +284,7 @@ async fn login_handler(
     Ok((
         StatusCode::OK,
         Json(AuthResponse {
-            user: auth::User {
+            user: common::User {
                 id: user_id,
                 username: user.username,
             },
@@ -303,26 +295,27 @@ async fn login_handler(
 
 async fn logout_handler(
     State(state): State<AppState>,
-    auth_user: AuthUser,
     headers: axum::http::HeaderMap,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
     // Retrieve token from header and mark it as revoked
     // Note: This is already validated by the AuthUser extractor
     let token = auth::extract_token_from_headers(&headers);
-
     if let Some(token) = token {
         // Revoke the token
-        query!("UPDATE auth_tokens SET is_revoked = 1 WHERE token = ?", token)
-            .execute(state.db_pool.as_ref())
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiError {
-                        error: format!("Failed to revoke token: {}", e),
-                    }),
-                )
-            })?;
+        query!(
+            "UPDATE auth_tokens SET is_revoked = 1 WHERE token = ?",
+            token
+        )
+        .execute(state.db_pool.as_ref())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: format!("Failed to revoke token: {}", e),
+                }),
+            )
+        })?;
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -356,17 +349,24 @@ async fn handle_websocket(socket: WebSocket, state: AppState, user_id: Option<i6
         match msg {
             Message::Text(text) => {
                 info!("Received message: {:?}", text);
-                
+
                 // Parse the request
                 let chat_request: Result<WsChatRequest, _> = serde_json::from_str(&text);
                 match chat_request {
                     Ok(request) => {
                         // Set default model to phi4 if not specified
-                        let model = if request.model.is_empty() { "phi4".to_string() } else { request.model };
-                        
+                        let model = if request.model.is_empty() {
+                            "phi4".to_string()
+                        } else {
+                            request.model
+                        };
+
                         let (messages, convo_id) = match request.chat_type {
                             ChatType::ContinueConvo(continue_convo) => {
-                                info!("Continuing conversation with ID: {}", continue_convo.conversation_id.0);
+                                info!(
+                                    "Continuing conversation with ID: {}",
+                                    continue_convo.conversation_id.0
+                                );
 
                                 // If user is authenticated, check if they own this conversation
                                 if let Some(uid) = user_id {
@@ -380,7 +380,9 @@ async fn handle_websocket(socket: WebSocket, state: AppState, user_id: Option<i6
                                     match conversation {
                                         Ok(Some(convo)) => {
                                             // Check if the authenticated user owns this conversation
-                                            if convo.user_id != uid {
+                                            // user_id is a non-nullable field in the database
+                                            // sqlx seems to return it as an Option<i64>
+                                            if convo.user_id.unwrap() != uid {
                                                 info!("Unauthorized access attempt to conversation {}", continue_convo.conversation_id.0);
                                                 // Send error message for unauthorized access
                                                 let error_msg = serde_json::json!({
@@ -388,18 +390,25 @@ async fn handle_websocket(socket: WebSocket, state: AppState, user_id: Option<i6
                                                 }).to_string();
 
                                                 let mut lock = sender.lock().await;
-                                                let _ = lock.send(Message::Text(error_msg.into())).await;
+                                                let _ = lock
+                                                    .send(Message::Text(error_msg.into()))
+                                                    .await;
                                                 return;
                                             }
-                                        },
+                                        }
                                         _ => {
-                                            info!("Conversation {} not found", continue_convo.conversation_id.0);
+                                            info!(
+                                                "Conversation {} not found",
+                                                continue_convo.conversation_id.0
+                                            );
                                             let error_msg = serde_json::json!({
                                                 "error": "Conversation not found"
-                                            }).to_string();
+                                            })
+                                            .to_string();
 
                                             let mut lock = sender.lock().await;
-                                            let _ = lock.send(Message::Text(error_msg.into())).await;
+                                            let _ =
+                                                lock.send(Message::Text(error_msg.into())).await;
                                             return;
                                         }
                                     }
@@ -412,7 +421,10 @@ async fn handle_websocket(socket: WebSocket, state: AppState, user_id: Option<i6
                                 ).fetch_all(db_pool.as_ref()).await.unwrap();
 
                                 if previous_messages.is_empty() {
-                                    tracing::warn!("No messages found for conversation ID: {}", continue_convo.conversation_id.0);
+                                    tracing::warn!(
+                                        "No messages found for conversation ID: {}",
+                                        continue_convo.conversation_id.0
+                                    );
                                     return;
                                 }
 
@@ -468,7 +480,10 @@ async fn handle_websocket(socket: WebSocket, state: AppState, user_id: Option<i6
                                 // Now, insert the user message(s) into the messages table
                                 let mut message_number: i64 = 0;
                                 for message in messages.iter() {
-                                    info!("Saving message: role={}, content={}", message.role, message.content);
+                                    info!(
+                                        "Saving message: role={}, content={}",
+                                        message.role, message.content
+                                    );
                                     match query!(
                                         "INSERT INTO messages (conversation_id, role, content, message_number) VALUES (?, ?, ?, ?)",
                                         new_conversation_id,
@@ -499,7 +514,7 @@ async fn handle_websocket(socket: WebSocket, state: AppState, user_id: Option<i6
                         let client = Arc::clone(&state.client);
 
                         // Clone the database pool for the task
-                        
+
                         let task_db_pool = Arc::clone(&state.db_pool);
                         // Spawn a task to make the request and handle the response
                         tokio::spawn(async move {
@@ -514,40 +529,70 @@ async fn handle_websocket(socket: WebSocket, state: AppState, user_id: Option<i6
                                 Ok(response) => {
                                     // Create a separate task to stream the response
                                     let mut stream = response.bytes_stream();
-                                    let mut complete_response: ChatMessage = ChatMessage { role: "bot".to_string(), content: String::new() };
+                                    let mut complete_response: ChatMessage = ChatMessage {
+                                        role: "bot".to_string(),
+                                        content: String::new(),
+                                    };
                                     let mut completed_safely: bool = false;
                                     while let Some(chunk) = stream.next().await {
                                         match chunk {
                                             Ok(bytes) => {
                                                 // Forward the response to the WebSocket client
-                                                if let Ok(text) = String::from_utf8(bytes.to_vec()) {
-                                                    let text_message = Message::Text((&text).into());
+                                                if let Ok(text) = String::from_utf8(bytes.to_vec())
+                                                {
+                                                    let text_message =
+                                                        Message::Text((&text).into());
 
                                                     // Try to parse the response using our typed struct
-                                                    if let Ok(ollama_response) = serde_json::from_str::<OllamaResponse>(&text) {
+                                                    if let Ok(ollama_response) =
+                                                        serde_json::from_str::<OllamaResponse>(
+                                                            &text,
+                                                        )
+                                                    {
                                                         // Check if this is the done message
-                                                        let is_done = ollama_response.done.unwrap_or(false);
+                                                        let is_done =
+                                                            ollama_response.done.unwrap_or(false);
                                                         if is_done {
                                                             completed_safely = true;
                                                         }
 
                                                         // Extract content from the response
-                                                        if let Some(content) = &ollama_response.content {
-                                                            complete_response.content.push_str(content);
-                                                        } else if let Some(message) = &ollama_response.message {
-                                                            complete_response.content.push_str(&message.content);
+                                                        if let Some(content) =
+                                                            &ollama_response.content
+                                                        {
+                                                            complete_response
+                                                                .content
+                                                                .push_str(content);
+                                                        } else if let Some(message) =
+                                                            &ollama_response.message
+                                                        {
+                                                            complete_response
+                                                                .content
+                                                                .push_str(&message.content);
                                                         }
 
                                                         // Wrap the response to include conversation ID
                                                         let wrapped_response = WsResponse {
                                                             response: ollama_response,
-                                                            conversation_id: if is_done { Some(convo_id.clone()) } else { None },
-                                                            is_final: if is_done { Some(true) } else { None },
+                                                            conversation_id: if is_done {
+                                                                Some(convo_id.clone())
+                                                            } else {
+                                                                None
+                                                            },
+                                                            is_final: if is_done {
+                                                                Some(true)
+                                                            } else {
+                                                                None
+                                                            },
                                                         };
 
                                                         // Serialize the wrapped response
-                                                        let wrapped_text = serde_json::to_string(&wrapped_response).unwrap();
-                                                        let message = Message::Text(wrapped_text.into());
+                                                        let wrapped_text = serde_json::to_string(
+                                                            &wrapped_response,
+                                                        )
+                                                        .unwrap();
+                                                        let message =
+                                                            Message::Text(wrapped_text.into());
 
                                                         let mut lock = sender_clone.lock().await;
                                                         if lock.send(message).await.is_err() {
@@ -663,8 +708,9 @@ async fn handle_websocket(socket: WebSocket, state: AppState, user_id: Option<i6
                         info!("Invalid JSON request: {}", e);
                         let error_msg = serde_json::json!({
                             "error": format!("Invalid request: {}", e)
-                        }).to_string();
-                        
+                        })
+                        .to_string();
+
                         let mut lock = sender.lock().await;
                         let _ = lock.send(Message::Text(error_msg.into())).await;
                     }

@@ -21,12 +21,12 @@
       {
         "name": "created_at",
         "ordinal": 3,
-        "type_info": "Datetime"
+        "type_info": "Integer"
       },
       {
         "name": "expires_at",
         "ordinal": 4,
-        "type_info": "Datetime"
+        "type_info": "Integer"
       },
       {
         "name": "is_revoked",

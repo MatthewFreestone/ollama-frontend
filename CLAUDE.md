@@ -24,4 +24,3 @@
 - Avoid unwrap() in production code, use proper error handling
 - Document public APIs with rustdoc comments
 - Prefer async/await for asynchronous code
-- Keep functions small and focused on a single responsibility
