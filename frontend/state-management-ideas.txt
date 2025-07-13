@@ -1,0 +1,370 @@
+# Message-Passing State Management for Vanilla WASM
+
+## Current Problem
+Our current approach uses `Rc<RefCell<AppState>>` which:
+- Risks runtime panics with borrow checking
+- Puts all state in one giant struct
+- Makes state management hard to reason about
+- Not very composable or testable
+
+## Proposed Message-Passing Architecture
+
+### Core Concept
+Instead of directly mutating shared state, we send messages to a central handler that processes them asynchronously. This is similar to Redux/Flux patterns but more Rust-idiomatic.
+
+### Architecture Overview
+
+```rust
+// 1. Define all possible actions as an enum
+#[derive(Debug, Clone)]
+enum AppMessage {
+    // Auth messages
+    Login { username: String, password: String },
+    Signup { username: String, password: String },
+    Logout,
+    
+    // Conversation messages
+    LoadConversations,
+    SelectConversation(i64),
+    CreateNewConversation,
+    
+    // WebSocket messages
+    ConnectWebSocket,
+    DisconnectWebSocket,
+    SendMessage(String),
+    
+    // UI update messages
+    UpdateConversationList(Vec<Conversation>),
+    UpdateAuthState(AuthState),
+    ShowError(String),
+}
+
+// 2. Separate state structs
+#[derive(Debug, Clone)]
+struct AuthState {
+    user_id: Option<i64>,
+    username: Option<String>,
+    token: Option<String>,
+    is_loading: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ConversationState {
+    conversations: Vec<Conversation>,
+    active_conversation_id: Option<i64>,
+    is_loading: bool,
+}
+
+#[derive(Debug, Clone)]
+struct WebSocketState {
+    connected: bool,
+    socket: Option<WebSocket>, // Note: This can't be cloned, so we'd handle differently
+}
+
+// 3. UI State (just DOM references, no business logic)
+struct UiState {
+    document: Document,
+    username_input: HtmlInputElement,
+    password_input: HtmlInputElement,
+    conversation_list: Element,
+    messages_div: Element,
+    // ... other DOM elements
+}
+
+// 4. Main app state container
+struct AppState {
+    auth: AuthState,
+    conversations: ConversationState,
+    websocket: WebSocketState,
+    ui: UiState,
+}
+```
+
+### Message Handler Implementation
+
+```rust
+use std::sync::mpsc;
+use wasm_bindgen_futures::spawn_local;
+
+struct App {
+    sender: mpsc::UnboundedSender<AppMessage>,
+    // UI elements that need direct access
+    ui: UiState,
+}
+
+impl App {
+    fn new() -> Result<Self, JsValue> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let ui = UiState::new()?;
+        
+        // Start the message handler in background
+        spawn_local(Self::message_handler(receiver, ui.clone()));
+        
+        Ok(Self { sender, ui })
+    }
+    
+    async fn message_handler(
+        mut receiver: mpsc::UnboundedReceiver<AppMessage>,
+        ui: UiState,
+    ) {
+        let mut state = AppState {
+            auth: AuthState::default(),
+            conversations: ConversationState::default(),
+            websocket: WebSocketState::default(),
+            ui,
+        };
+        
+        while let Some(message) = receiver.recv().await {
+            Self::handle_message(message, &mut state).await;
+        }
+    }
+    
+    async fn handle_message(message: AppMessage, state: &mut AppState) {
+        match message {
+            AppMessage::Login { username, password } => {
+                state.auth.is_loading = true;
+                Self::update_auth_ui(state);
+                
+                match Self::perform_login(&username, &password).await {
+                    Ok(auth_response) => {
+                        state.auth = AuthState {
+                            user_id: Some(auth_response.user.id),
+                            username: Some(auth_response.user.username),
+                            token: Some(auth_response.token),
+                            is_loading: false,
+                        };
+                        Self::update_auth_ui(state);
+                        
+                        // Trigger conversation loading
+                        Self::handle_message(AppMessage::LoadConversations, state).await;
+                    }
+                    Err(error) => {
+                        state.auth.is_loading = false;
+                        Self::update_auth_ui(state);
+                        Self::show_error(state, &error);
+                    }
+                }
+            }
+            
+            AppMessage::LoadConversations => {
+                if let Some(token) = &state.auth.token {
+                    state.conversations.is_loading = true;
+                    Self::update_conversation_ui(state);
+                    
+                    match Self::fetch_conversations(token).await {
+                        Ok(conversations) => {
+                            state.conversations.conversations = conversations;
+                            state.conversations.is_loading = false;
+                            Self::update_conversation_ui(state);
+                        }
+                        Err(error) => {
+                            state.conversations.is_loading = false;
+                            Self::show_error(state, &error);
+                        }
+                    }
+                }
+            }
+            
+            AppMessage::Logout => {
+                if let Some(token) = &state.auth.token {
+                    let _ = Self::perform_logout(token).await;
+                }
+                
+                state.auth = AuthState::default();
+                state.conversations = ConversationState::default();
+                // Clear WebSocket connection
+                if state.websocket.connected {
+                    Self::handle_message(AppMessage::DisconnectWebSocket, state).await;
+                }
+                
+                Self::update_auth_ui(state);
+                Self::update_conversation_ui(state);
+            }
+            
+            AppMessage::SelectConversation(conversation_id) => {
+                state.conversations.active_conversation_id = Some(conversation_id);
+                Self::update_conversation_ui(state);
+                // Load messages for this conversation
+                Self::load_conversation_messages(state, conversation_id).await;
+            }
+            
+            AppMessage::ConnectWebSocket => {
+                // WebSocket connection logic
+                // Note: This would need special handling since WebSocket can't be cloned
+            }
+            
+            // ... handle other messages
+        }
+    }
+}
+```
+
+### Event Handler Setup
+
+```rust
+impl App {
+    fn setup_event_listeners(&self) -> Result<(), JsValue> {
+        let sender = self.sender.clone();
+        
+        // Login button
+        let login_callback = {
+            let sender = sender.clone();
+            let username_input = self.ui.username_input.clone();
+            let password_input = self.ui.password_input.clone();
+            
+            Closure::wrap(Box::new(move |_: web_sys::Event| {
+                let username = username_input.value();
+                let password = password_input.value();
+                
+                if !username.trim().is_empty() && !password.trim().is_empty() {
+                    let _ = sender.send(AppMessage::Login { username, password });
+                }
+            }) as Box<dyn FnMut(_)>)
+        };
+        
+        self.ui.login_btn.set_onclick(Some(login_callback.as_ref().unchecked_ref()));
+        login_callback.forget();
+        
+        // Logout button
+        let logout_callback = {
+            let sender = sender.clone();
+            Closure::wrap(Box::new(move |_: web_sys::Event| {
+                let _ = sender.send(AppMessage::Logout);
+            }) as Box<dyn FnMut(_)>)
+        };
+        
+        self.ui.logout_btn.set_onclick(Some(logout_callback.as_ref().unchecked_ref()));
+        logout_callback.forget();
+        
+        // New conversation button
+        let new_conversation_callback = {
+            let sender = sender.clone();
+            Closure::wrap(Box::new(move |_: web_sys::Event| {
+                let _ = sender.send(AppMessage::CreateNewConversation);
+            }) as Box<dyn FnMut(_)>)
+        };
+        
+        self.ui.new_conversation_btn.set_onclick(Some(new_conversation_callback.as_ref().unchecked_ref()));
+        new_conversation_callback.forget();
+        
+        Ok(())
+    }
+}
+```
+
+### Main Function
+
+```rust
+pub fn main() -> Result<(), JsValue> {
+    console_error_panic_hook::set_once();
+    
+    let app = App::new()?;
+    app.setup_event_listeners()?;
+    
+    // Send initial load message
+    let _ = app.sender.send(AppMessage::LoadConversations);
+    
+    Ok(())
+}
+```
+
+## Benefits of This Approach
+
+1. **No Runtime Panics**: No more `borrow_mut()` failures
+2. **Clear Data Flow**: All state changes go through message handler
+3. **Easier Testing**: Can test message handlers in isolation
+4. **Better Error Handling**: Centralized error handling
+5. **Composable**: Easy to add new message types
+6. **Async-Friendly**: All async operations handled in message handler
+7. **Single Source of Truth**: State lives in one place, UI is derived from it
+
+## Implementation Notes
+
+### WebSocket Handling
+WebSockets need special handling since they can't be cloned:
+
+```rust
+// Store WebSocket separately and communicate via channels
+struct WebSocketManager {
+    sender: mpsc::UnboundedSender<WebSocketMessage>,
+}
+
+enum WebSocketMessage {
+    Connect(String), // URL
+    Disconnect,
+    Send(String),
+    Received(String),
+}
+```
+
+### UI Updates
+Create dedicated functions for updating UI based on state:
+
+```rust
+impl App {
+    fn update_auth_ui(state: &AppState) {
+        if let Some(username) = &state.auth.username {
+            // Show logged in state
+            state.ui.login_form.style().set_property("display", "none");
+            state.ui.user_info.style().set_property("display", "block");
+            state.ui.username_display.set_text_content(Some(&format!("Logged in as: {}", username)));
+        } else {
+            // Show login form
+            state.ui.login_form.style().set_property("display", "block");
+            state.ui.user_info.style().set_property("display", "none");
+        }
+        
+        // Update loading states
+        state.ui.login_btn.set_disabled(state.auth.is_loading);
+    }
+    
+    fn update_conversation_ui(state: &AppState) {
+        // Clear and repopulate conversation list
+        state.ui.conversation_list.set_inner_html("");
+        
+        for conversation in &state.conversations.conversations {
+            let item = state.ui.document.create_element("div").unwrap();
+            item.set_class_name("conversation-item");
+            
+            if Some(conversation.id) == state.conversations.active_conversation_id {
+                item.class_list().add_1("active").unwrap();
+            }
+            
+            item.set_text_content(conversation.title.as_deref());
+            state.ui.conversation_list.append_child(&item).unwrap();
+        }
+    }
+}
+```
+
+## Migration Strategy
+
+1. **Start Small**: Begin by converting one feature (e.g., auth) to message-passing
+2. **Gradual Refactor**: Move other features one by one
+3. **Keep UI Separate**: Don't change UI code initially, just the state management
+4. **Add Types Incrementally**: Add new message types as needed
+
+This approach gives you the benefits of modern state management patterns while staying in vanilla WASM/Rust, making the codebase much more maintainable and testable.
+
+## Context for Future Development
+
+### Current Codebase Structure
+- **Backend**: Axum server with SQLite database, authentication via tokens
+- **Frontend**: Vanilla WASM with manual DOM manipulation
+- **Common**: Shared types between frontend and backend
+- **Features**: User auth, WebSocket chat, conversation persistence
+
+### API Endpoints Available
+- POST /api/auth/login
+- POST /api/auth/signup  
+- POST /api/auth/logout
+- GET /api/conversations
+- WebSocket /ws (with token query param support)
+
+### Database Schema
+- users (id, username, password_hash)
+- auth_tokens (id, user_id, token, created_at, expires_at, is_revoked)
+- conversations (id, user_id, created_at, updated_at)
+- messages (id, conversation_id, role, content, message_number)
+
+This message-passing approach would significantly improve code organization and make the frontend much more maintainable as it grows.

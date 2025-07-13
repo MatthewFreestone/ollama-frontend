@@ -1,16 +1,15 @@
 use futures::channel::mpsc;
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 use wasm_bindgen_futures::spawn_local;
 
-use common::{ContinueConvo, ConvoId};
+use common::ContinueConvo;
 use common::{ChatMessage, ChatType, WsChatRequest, LoginRequest, SignupRequest, AuthResponse, ApiError, TOKEN_HEADER, Conversation, ConversationsResponse};
 use gloo_utils::format::JsValueSerdeExt;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    Document, Element, HtmlButtonElement, HtmlSelectElement, HtmlTextAreaElement,
-    HtmlInputElement, WebSocket, Request, RequestInit, Response, Headers,
+    HtmlTextAreaElement, WebSocket, Request, RequestInit, Response, Headers,
 };
 use serde_json;
 use web_sys::console;
@@ -543,8 +542,6 @@ impl App {
         {
             let sender = sender.clone();
             let connect_callback = Closure::wrap(Box::new(move |_: web_sys::Event| {
-                log("Connect method called"); 
-
                 let _ = sender.unbounded_send(AppMessage::ConnectWebSocket);
             }) as Box<dyn FnMut(_)>);
             
@@ -616,7 +613,7 @@ pub fn main() -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
     log("WASM initialization started");
     
-    let mut app = App::new()?;
+    let app = App::new()?;
     app.setup_event_listeners()?;
     
     // Send initial load message
