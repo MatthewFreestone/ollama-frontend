@@ -124,7 +124,7 @@ pub struct ApiError {
     pub error: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Conversation {
     pub id: i64,
     pub user_id: Option<i64>,
